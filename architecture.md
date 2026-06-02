@@ -132,6 +132,10 @@ Notes:
   callback just carries the URL + metadata, not the markdown body.
 - The SDK ships a **published webhook route** and `ParseCompleted` / `ParseFailed` events, so
   the developer writes a listener, not a controller. No `webhook:` argument on `->async()`.
+- **Batch submit:** `Parse::files([...])->async()` presigns each file, INSERTs one
+  `parse_requests` row per file, and sends them as a single batch payload to the SaaS, which
+  fans out one Modal trigger per file. Returns a collection of `ParseRequest`. Each file gets
+  its own webhook + `ParseCompleted` event — the result path is identical to single-file.
 
 ### Client SDK state — the `parse_requests` table
 

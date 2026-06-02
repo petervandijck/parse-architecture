@@ -9,6 +9,13 @@ $markdown = Parse::file('contract.pdf')->markdown();
 
 // From a URL
 $markdown = Parse::url('https://parseforartisans.com/samples/invoice.pdf')->markdown();
+
+// With options (pick a disk, force OCR, limit pages, add frontmatter)
+$markdown = Parse::disk('s3')->file('contracts/contract.pdf')
+    ->ocr(true)
+    ->pages('1-20')
+    ->frontmatter(true)
+    ->markdown();
 ```
 
 That's the whole thing. Point it at a file or a URL, get Markdown back.
@@ -247,6 +254,28 @@ so **you can call it inline in a controller — you don't need Laravel's queue.*
 > Submitting **thousands** at once? That's the one time to reach for Laravel's queue —
 > wrap the `->async()` call in your own job so the submissions run in parallel with retries.
 > The SDK doesn't force a queue; it's your call.
+
+#### Parse a whole batch
+
+Got a pile of files? Hand `Parse::files()` an array (or a collection) of paths. They're
+submitted as one batch and you get back a collection of `ParseRequest` models — one per file:
+
+```php
+use ParseForArtisans\Facades\Parse;
+
+$paths = Storage::disk('s3')->files('contracts');   // ['contracts/a.pdf', 'contracts/b.docx', ...]
+
+$batch = Parse::disk('s3')->files($paths)
+    ->frontmatter(true)        // options apply to every file in the batch
+    ->async();
+
+$batch->count();               // how many were queued
+$batch->pluck('id');           // the parse references the SDK is tracking
+```
+
+Each file fires its own `ParseCompleted` event as it finishes (see below) — so you handle
+results the same way whether you submitted one file or ten thousand. For very large batches,
+dispatch the `Parse::files(...)->async()` call from a queued job so it runs in the background.
 
 ### 3. Handle the result
 
