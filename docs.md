@@ -24,6 +24,11 @@ $batch = Parse::disk('s3')->files($paths)->async(); // Starts parsing for all th
 
 That's the whole thing. Point it at a file, a URL, or a pile of them — get Markdown back.
 
+**Most apps should use the [async flow](#the-async-flow-recommended).** It doesn't block your
+app, has no size cap, and scales from one file to tens of thousands. The synchronous
+`->markdown()` shown above returns the string inline — handy when a user is waiting on a
+single small document, but think of it as the quick exception, not the default.
+
 ---
 
 ## What it supports
@@ -55,7 +60,7 @@ Highlights:
 - **Optional frontmatter.** Add `->frontmatter()` to prepend YAML metadata (author, dates,
   page/slide/sheet counts).
 - **Page ranges.** Parse just the pages you want with `->pages('1-20')`.
-- **Large files.** Documents up to **200 MB** via the [async flow](#large-files--bulk-the-async-flow)
+- **Large files.** Documents up to **200 MB** via the [async flow](#the-async-flow-recommended)
   (the sync call is capped at 20 MB).
 - **Massive bulk.** Queue **tens of thousands of files at once** — the backend scales out to
   absorb the burst and writes each result straight back to your bucket.
@@ -143,85 +148,17 @@ Add `--save=out.md` to write the result to a file instead of printing it.
 
 ---
 
-## Usage
+## The async flow (recommended)
 
-### Parse a file
-
-Use the `Parse` facade. It takes a path on your filesystem disk (or an `UploadedFile`):
-
-```php
-use ParseForArtisans\Facades\Parse;
-
-$markdown = Parse::file('contract.pdf')->markdown();           // default disk
-$markdown = Parse::disk('s3')->file('contracts/foo.pdf')->markdown();
-```
-
-Paths resolve against your configured disk (just like `Storage::get()`), so you never
-hand-build an OS path. Absolute filesystem paths and `UploadedFile` instances work too.
-
-### Parse a URL
-
-Already have the document at a public URL? Skip the upload entirely — we fetch it. You can
-run this right now in `php artisan tinker` with our sample file — no PDF needed:
-
-```php
-use ParseForArtisans\Facades\Parse;
-
-$markdown = Parse::url('https://parseforartisans.com/samples/invoice.pdf')->markdown();
-```
-
-Both of these are the **sync flow**: you send a file or URL, you get the Markdown back in the
-same request. Good for files up to **20 MB** (and a single document a user is waiting on). No
-bucket needed on your end — bring-your-own-bucket is only for the
-[async flow](#large-files--bulk-the-async-flow).
-
-### From a file upload
-
-Working with a Laravel 13 file upload? Call `->markdown()` straight on the uploaded file:
-
-```php
-use Illuminate\Http\Request;
-
-public function store(Request $request)
-{
-    $request->validate([
-        'document' => ['required', 'file', 'mimes:pdf,docx,xlsx', 'max:20480'], // 20 MB
-    ]);
-
-    $markdown = $request->file('document')->markdown();
-
-    return response($markdown)->header('Content-Type', 'text/markdown');
-}
-```
-
-You don't tell us the file type — we detect it (PDF, Word, PowerPoint, Excel, email, and
-more) and route it automatically.
-
-### Options
-
-Chain options before `->markdown()`:
-
-```php
-$markdown = Parse::file($path)
-    ->ocr(true)              // force OCR (auto-detected by default for scanned PDFs)
-    ->pages('1-20')          // only these pages
-    ->frontmatter(true)      // prepend YAML frontmatter (author, dates, page count)
-    ->markdown();
-```
-
-> The exact option set is still being finalized — treat this list as the direction, not a
-> contract.
-
----
-
-## Large files & bulk: the async flow
-
-The sync flow blocks until the parse finishes, so it's capped (e.g. **20 MB**). Most of the time,
-you'll want to use the **async flow**. It doesn't block your app, and you can send large amounts of files.
+This is the default way to parse with Parse for Artisans. It doesn't block your app, has no
+size cap (up to **200 MB** per file), and handles anything from one file to tens of thousands.
 
 - You ping the service (no need to queue this, it's a quick api call).
 - The SDK handles signing URLs, webhook, secrets etc.
 - A few minutes later you receive a Laravel event (through the webhook): your markdown is available.
+
+> Just need the Markdown back inline for a single small document a user is waiting on? Use the
+> [synchronous flow](#synchronous-parsing-the-quick-exception) instead.
 
 ### 1. Point the SDK at your bucket
 
@@ -306,6 +243,79 @@ class StoreParsedDocument
 
 The Markdown is already sitting in your bucket by the time the event fires — the callback
 just tells you it's ready. (`ParseFailed` fires on errors, carrying `$request->error`.)
+
+---
+
+## Synchronous parsing (the quick exception)
+
+Reach for this only when a user is waiting on a **single, small document** and you want the
+Markdown string back in the same request. It blocks until the parse finishes (so it's capped
+at **20 MB**) and needs no bucket or webhook setup — just your API key. For everything else,
+prefer the [async flow](#the-async-flow-recommended) above.
+
+### Parse a file
+
+Use the `Parse` facade. It takes a path on your filesystem disk (or an `UploadedFile`):
+
+```php
+use ParseForArtisans\Facades\Parse;
+
+$markdown = Parse::file('contract.pdf')->markdown();           // default disk
+$markdown = Parse::disk('s3')->file('contracts/foo.pdf')->markdown();
+```
+
+Paths resolve against your configured disk (just like `Storage::get()`), so you never
+hand-build an OS path. Absolute filesystem paths and `UploadedFile` instances work too.
+
+### Parse a URL
+
+Already have the document at a public URL? Skip the upload entirely — we fetch it. You can
+run this right now in `php artisan tinker` with our sample file — no PDF needed:
+
+```php
+use ParseForArtisans\Facades\Parse;
+
+$markdown = Parse::url('https://parseforartisans.com/samples/invoice.pdf')->markdown();
+```
+
+Both return the Markdown string inline — no bucket needed on your end.
+
+### From a file upload
+
+Working with a Laravel 13 file upload? Call `->markdown()` straight on the uploaded file:
+
+```php
+use Illuminate\Http\Request;
+
+public function store(Request $request)
+{
+    $request->validate([
+        'document' => ['required', 'file', 'mimes:pdf,docx,xlsx', 'max:20480'], // 20 MB
+    ]);
+
+    $markdown = $request->file('document')->markdown();
+
+    return response($markdown)->header('Content-Type', 'text/markdown');
+}
+```
+
+You don't tell us the file type — we detect it (PDF, Word, PowerPoint, Excel, email, and
+more) and route it automatically.
+
+### Options
+
+Chain options before `->markdown()`:
+
+```php
+$markdown = Parse::file($path)
+    ->ocr(true)              // force OCR (auto-detected by default for scanned PDFs)
+    ->pages('1-20')          // only these pages
+    ->frontmatter(true)      // prepend YAML frontmatter (author, dates, page count)
+    ->markdown();
+```
+
+> The exact option set is still being finalized — treat this list as the direction, not a
+> contract.
 
 ---
 

@@ -54,6 +54,10 @@ and Modal endpoint routing live in the SaaS app** (by extension + MIME sniff), s
 stays dumb and the customer never thinks about PDF-vs-docx-vs-xlsx. *(Final placement to be
 confirmed — leaning SaaS.)*
 
+> **Async (Flow B) is the recommended default** in the product/docs; sync (Flow A) is framed
+> as the quick exception for a single small document a user is waiting on. The method
+> semantics stay honest: `->markdown()` returns a string (sync), `->async()` returns a handle.
+
 ## Flow A — Sync / blocking (`->markdown()`)
 
 For the simple, interactive case. **Zero buckets for the customer** — they send the file
