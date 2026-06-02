@@ -263,12 +263,11 @@ See [architecture.md](architecture.md) for the full end-to-end async flow.
 Parsed Markdown drops straight into a prompt:
 
 ```php
+use Illuminate\Support\Facades\AI;
+
 $markdown = $request->file('contract')->markdown();
 
-$summary = Prism::text()
-    ->using('anthropic', 'claude-opus-4-8')
-    ->withPrompt("Summarize this contract:\n\n{$markdown}")
-    ->generate();
+$summary = AI::text("Summarize this contract:\n\n{$markdown}")->text();
 ```
 
 ---
