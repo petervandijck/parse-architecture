@@ -237,7 +237,7 @@ these are decided; we'll pick which gaps to close later.
   *Option: add an image→markdown OCR path; cheap, obvious.*
 - **Structured / coordinate output.** liteparse (PDFium) returns bounding boxes, font info,
   and confidence per token — enabling citations, highlighting, redaction. We emit markdown
-  only. *Different product axis; revisit if customers want spatial data.*
+  only. *Demand-driven roadmap item — see "Roadmap: structured output" below.*
 - **Pluggable OCR.** parsel can route to EasyOCR/PaddleOCR for higher accuracy; we're fixed
   on Tesseract at the default tier.
 
@@ -261,6 +261,32 @@ these are decided; we'll pick which gaps to close later.
 Neither stack matches true vision-model cloud parsers (LlamaParse/Reducto) — both top out at
 Tesseract-class OCR. A future vision-model worker tier is the path to close that, and is
 something only the cloud architecture (not a local library) can do.
+
+## Roadmap: structured output — bounding boxes + page images (build on demand)
+
+**Not building yet — add when customers ask.** Captured here so we know the cost up front.
+The engine work is nearly free (the PDF worker already imports `fitz` / PyMuPDF); the real
+cost is the output plumbing and a new API/SDK contract.
+
+- **Bounding boxes — easy (~1–1.5 days incl. OCR path).** PyMuPDF already exposes what PDFium
+  does, and richer: `page.get_text("words")` gives per-word `(x0,y0,x1,y1)`; `get_text("dict")`
+  adds font/size/color. For scanned PDFs, `pytesseract.image_to_data()` gives per-word boxes
+  **+ confidence** (matches parsel's confidence field). Serialize to JSON → one extra presigned
+  URL. Document the PDF-points coordinate system and emit page width/height for normalization.
+- **Page images — easy to render, plumbing is the work (~2–3 days).** `page.get_pixmap(dpi=…)`
+  renders PNGs with no new deps (no poppler needed). The hard part is **N variable outputs** vs.
+  today's single `upload_url`. Options:
+  - **A. Zip bundle** — render all pages, PUT one `screenshots.zip` to a single presigned URL.
+    Keeps the current one-URL contract; simplest. *(Recommended for v1.)*
+  - **B. Scoped credentials** — SDK mints short-lived STS creds for a `screenshots/` prefix; the
+    worker writes `page-N.png` individually. Cleanest for per-page URLs; more setup. *(Later.)*
+  - **C. Two-phase** — probe page count, presign N URLs, then render. Chattier round-trips.
+- **Scope: PDF + images only.** docx/xlsx/pptx have no page raster without rendering via
+  LibreOffice first (ties to the high-fidelity Office tier above).
+- **Output-shape decision (the real design call, not difficulty).** These aren't a markdown
+  string. They want a distinct **structured mode** — e.g. `Parse::file(...)->layout()` returning
+  page objects `{ markdown, image_url, words: [{text, bbox, confidence}] }` — separate from
+  `->markdown()`. Decide the surface when we commit to building.
 
 ## What lives where (repos)
 
