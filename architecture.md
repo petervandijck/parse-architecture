@@ -91,7 +91,7 @@ Notes:
 
 ## Flow B — Async, bring-your-own-bucket (`->async()`)
 
-**This is the recommended async flow** for large files (up to ~200 MB to start) and bulk
+**This is the recommended async flow** for large files (up to **1 GB**) and bulk
 imports (tens of thousands of files at once; the Modal backend is built for these bursts).
 
 The key property: **the SaaS never touches the file bytes.** The customer's file already
@@ -190,10 +190,11 @@ Trade-off to settle: SaaS-side keeps Modal dumb and makes cost/routing visible t
 Modal-side keeps the SaaS contract to a single endpoint per type. Leaning SaaS-side for
 visibility, but undecided.
 
-### Chunked parsing (the path to 1 GB+)
+### Chunked parsing (the path to 1 GB)
 
-For documents too big for even a `large` worker in one pass, split and parallelize (this is
-the existing TODO in `parse-function/CLAUDE.md`):
+**Committed target: support up to 1 GB per file** (advertised in the docs). The backend will
+be built to deliver this. For documents too big for even a `large` worker in one pass, split
+and parallelize (this is the existing TODO in `parse-function/CLAUDE.md`):
 1. **Split** into page ranges (e.g. 50 pages each) — `pymupdf4llm.to_markdown(pages=[...])`
    and `pdf2image`'s `first_page`/`last_page` already support this.
 2. **Fan out** the chunks across many containers in parallel (already scales to
@@ -206,8 +207,8 @@ This also lifts today's hard caps that block big files: `MAX_PAGES_FOR_OCR = 200
 huge docs *faster*, not just possible (a 2,000-page PDF → 40 parallel 50-page jobs instead
 of one serial grind).
 
-**Status:** design only. Public docs cap async at **200 MB to start**; 1 GB+ depends on
-shipping chunked parsing.
+**Status:** docs advertise **up to 1 GB**; the backend work (chunked parsing + raised
+caps/timeouts/disk) is committed and **to build in `parse-function`**.
 
 ## Backend quality, gaps & risks (TBD)
 
@@ -310,7 +311,7 @@ cost is the output plumbing and a new API/SDK contract.
 - Pricing/metering unit (page / file / MB).
 - Final home of file-type detection (leaning SaaS).
 - Worker tiers + where size-based routing lives (SaaS-side vs. Modal-side); chunked parsing
-  for 1 GB+ — see "Scaling the parse backend" above. Async cap is **200 MB to start**.
+  for the **1 GB** target — see "Scaling the parse backend" above. Docs advertise up to 1 GB.
 - Which backend gaps to close (Office fidelity via LibreOffice, image OCR, structured/coord
   output) and the **PyMuPDF AGPL licensing** question — see "Backend quality, gaps & risks".
   `parse-function` is not final and can be adjusted.

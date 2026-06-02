@@ -60,7 +60,7 @@ Highlights:
 - **Optional frontmatter.** Add `->frontmatter()` to prepend YAML metadata (author, dates,
   page/slide/sheet counts).
 - **Page ranges.** Parse just the pages you want with `->pages('1-20')`.
-- **Large files.** Documents up to **200 MB** via the [async flow](#the-async-flow-recommended)
+- **Large files.** Documents up to **1 GB** via the [async flow](#the-async-flow-recommended)
   (the sync call is capped at 20 MB).
 - **Massive bulk.** Queue **tens of thousands of files at once** — the backend scales out to
   absorb the burst and writes each result straight back to your bucket.
@@ -151,7 +151,7 @@ Add `--save=out.md` to write the result to a file instead of printing it.
 ## The async flow (recommended)
 
 This is the default way to parse with Parse for Artisans. It doesn't block your app, has no
-size cap (up to **200 MB** per file), and handles anything from one file to tens of thousands.
+size cap (up to **1 GB** per file), and handles anything from one file to tens of thousands.
 
 - You ping the service (no need to queue this, it's a quick api call).
 - The SDK handles signing URLs, webhook, secrets etc.
@@ -337,7 +337,7 @@ $summary = AI::text("Summarize this contract:\n\n{$markdown}")->text();
 
 | Aspect | Sync | Async |
 |:--|:--|:--|
-| **Max file size** | 20 MB | 200 MB |
+| **Max file size** | 20 MB | 1 GB |
 | **Returns** | Markdown string, in the response | Webhook callback |
 | **Best for** | One file, user waiting | Large files, bulk imports |
 
