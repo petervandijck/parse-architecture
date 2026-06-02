@@ -165,6 +165,64 @@ of one serial grind).
 **Status:** design only. Public docs cap async at **200 MB to start**; 1 GB+ depends on
 shipping chunked parsing.
 
+## Backend quality, gaps & risks (TBD)
+
+The parse backend ([`../parse-function/CLAUDE.md`](../parse-function/CLAUDE.md)) is **not
+final** — it's a per-format Python stack we can adjust. Benchmarking against
+[parsel](https://github.com/shipfastlabs/parsel) (a local PHP library built on
+[liteparse](https://github.com/run-llama/liteparse) — the same engine `parse-function`
+already evaluated and rejected) surfaced where our underlying packages are weaker. None of
+these are decided; we'll pick which gaps to close later.
+
+### Our current engines
+
+| Type | Engine | Output |
+|:--|:--|:--|
+| PDF | `pymupdf4llm` (MuPDF) | Markdown — headings, tables, multi-column reading order, links |
+| Scanned PDF | Tesseract (via `pdf2image`) | Markdown (OCR), capped at 200 pages |
+| `.docx` | `mammoth` | Markdown |
+| `.pptx` | `python-pptx` | Markdown (text + tables) |
+| `.xlsx` | `openpyxl` | Markdown tables |
+| `.eml`/`.msg` | stdlib `email` / `extract-msg` | Markdown + frontmatter |
+| images | `pyvips` (optimize only) | **No markdown** |
+
+### Where we're likely weaker than the parsel/liteparse stack
+
+- **Office fidelity (biggest gap).** parsel uses **LibreOffice**, which does true
+  layout-fidelity conversion and handles legacy `.doc`/`.ppt`. Our `mammoth` / `python-pptx`
+  / `openpyxl` are lightweight but lower-fidelity on complex documents, and we don't support
+  the legacy binary formats at all. *Option: a LibreOffice-backed "high-fidelity Office"
+  worker tier (fits the worker-tiers plan above).*
+- **Standalone image OCR (clear hole).** parsel OCRs images (ImageMagick → PDF → Tesseract).
+  Our image worker only **optimizes** (resize to JPEG) — it produces no text/markdown.
+  *Option: add an image→markdown OCR path; cheap, obvious.*
+- **Structured / coordinate output.** liteparse (PDFium) returns bounding boxes, font info,
+  and confidence per token — enabling citations, highlighting, redaction. We emit markdown
+  only. *Different product axis; revisit if customers want spatial data.*
+- **Pluggable OCR.** parsel can route to EasyOCR/PaddleOCR for higher accuracy; we're fixed
+  on Tesseract at the default tier.
+
+### Where we're likely stronger
+
+- **Markdown-first.** liteparse outputs text/JSON only — you'd build markdown yourself.
+- **Complex-layout markdown.** liteparse's own README concedes weakness on dense tables,
+  multi-column, and scanned PDFs; `pymupdf4llm` handles multi-column reading order + tables.
+- **Scale & ops.** Cloud autoscale + async bulk vs. a synchronous local library whose heavy
+  LibreOffice path is slow and concurrency-unsafe. Zero-install DX (`composer` + key) vs. a
+  binary install chain on the customer's server.
+
+### Licensing risk (our side)
+
+- **`pymupdf4llm` = PyMuPDF / MuPDF is AGPL.** For a commercial paid SaaS this likely
+  requires an Artifex commercial license — **resolve before charging.** (liteparse's PDFium
+  is BSD, so cleaner.) Track this as a real blocker, not a nice-to-have.
+
+### Reality check
+
+Neither stack matches true vision-model cloud parsers (LlamaParse/Reducto) — both top out at
+Tesseract-class OCR. A future vision-model worker tier is the path to close that, and is
+something only the cloud architecture (not a local library) can do.
+
 ## What lives where (repos)
 
 - `parse-architecture` (this repo) — architecture + user docs only. No app code.
@@ -180,3 +238,6 @@ shipping chunked parsing.
 - Final home of file-type detection (leaning SaaS).
 - Worker tiers + where size-based routing lives (SaaS-side vs. Modal-side); chunked parsing
   for 1 GB+ — see "Scaling the parse backend" above. Async cap is **200 MB to start**.
+- Which backend gaps to close (Office fidelity via LibreOffice, image OCR, structured/coord
+  output) and the **PyMuPDF AGPL licensing** question — see "Backend quality, gaps & risks".
+  `parse-function` is not final and can be adjusted.
