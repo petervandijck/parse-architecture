@@ -16,9 +16,13 @@ $markdown = Parse::disk('s3')->file('contracts/contract.pdf')
     ->pages('1-20')
     ->frontmatter(true)
     ->markdown();
+
+// A whole batch, async — results arrive via a Laravel event
+$paths = Storage::disk('s3')->files('contracts');   // ['contracts/1.pdf', 'contracts/2.docx', ...]
+$batch = Parse::disk('s3')->files($paths)->async(); // Starts parsing for all the files, async
 ```
 
-That's the whole thing. Point it at a file or a URL, get Markdown back.
+That's the whole thing. Point it at a file, a URL, or a pile of them — get Markdown back.
 
 ---
 
