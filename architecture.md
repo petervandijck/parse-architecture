@@ -8,7 +8,7 @@ overview and open decisions.
 
 | # | System | What it is | Owns |
 |---|--------|-----------|------|
-| 1 | **Client SDK** | Composer package the customer installs (`composer require ...`) | The `Parse::file()` / `->markdown()` surface. Talks only to the SaaS API over HTTPS with the customer's API key. |
+| 1 | **Client SDK** | Composer package the customer installs (`composer require ...`) | The `Parse::file()` / `->markdown()` / `->async()` surface. Talks only to the SaaS API over HTTPS with the customer's API key. For async, owns a `parse_requests` table (correlation + status) and a signed webhook route. |
 | 2 | **SaaS app** | The Laravel application we run at parseforartisans.com | Auth, API keys, billing/metering, file storage, presigned URLs, file-type detection & routing, calling Modal, receiving Modal's webhook, serving results back to the SDK, customer webhooks. |
 | 3 | **Parse backend** | Existing Modal serverless workers (`../parse-function`) | The actual parse. One endpoint per file type. Fully async. Never customer-facing. |
 | 4 | **Queue** | Laravel queue (Redis/SQS) inside the SaaS app | Async/bulk jobs: dispatching to Modal, handling the Modal webhook, firing the customer webhook. |
@@ -31,9 +31,10 @@ customer app ──────▶ Client SDK ──────────▶ 
   exposed to customers.
 - **Modal ↔ SaaS (webhook):** Modal POSTs back with a per-request **`webhook_secret`** the
   SaaS generated; the SaaS verifies it before trusting the callback.
-- **SaaS ↔ Customer (async result):** the SaaS POSTs the result to a **customer webhook**
-  URL, signed so the customer can verify it. **Async delivery is webhook-based — no
-  polling.**
+- **SaaS ↔ Customer (async result):** the SaaS POSTs the result to the SDK's webhook route,
+  **HMAC-signed with a single per-account signing secret** (`PARSE_WEBHOOK_SECRET`,
+  Stripe-style). The SDK verifies the signature against that one config value — no per-request
+  secret is stored on the customer side. **Async delivery is webhook-based — no polling.**
 
 ## Client SDK input API
 
@@ -84,7 +85,7 @@ Notes:
   use async" error. Step 6→8 correlation (cache key on `webhook_secret`, or short internal
   poll of the job record) is a SaaS implementation detail.
 
-## Flow B — Async / queued, bring-your-own-bucket (`->queue()`)
+## Flow B — Async, bring-your-own-bucket (`->async()`)
 
 **This is the recommended async flow** for large files (up to ~200 MB to start) and bulk
 imports (tens of thousands of files at once; the Modal backend is built for these bursts).
@@ -96,24 +97,27 @@ and the markdown lands **back in the customer's own bucket**. Fast to submit, pr
 never transits us), cheap (no storage on our side).
 
 The SDK owns all the plumbing. The developer only configures a **disk** — the SDK generates
-the presigned URLs, the webhook secret, and the webhook route automatically. **No polling.**
+the presigned URLs, persists a `ParseRequest` row for correlation, and handles the webhook
+route automatically. **No polling.** Note: `->async()` is a fast inline HTTP call (tiny
+payload) — it does **not** require Laravel's queue. Customers reach for their own queue only
+to fan out bulk submissions.
 
 ```
-1. customer:  Parse::file('contracts/foo.pdf')->queue();   // path on their parse disk
-2. SDK:       presign GET file_url + PUT upload_url on the customer's bucket,
-              mint webhook_secret, create local job record
-3. SDK     →  POST /v1/parse {file_url, upload_url,
-              webhook_url, webhook_secret}  (tiny, API key)  ──▶ SaaS   (202 { id })
+1. customer:  $parse = Parse::file('contracts/foo.pdf')->async();   // path on their parse disk
+2. SDK:       mint id (uuid), presign GET file_url + PUT upload_url on the
+              customer's bucket, INSERT parse_requests row (status=pending)
+3. SDK     →  POST /v1/parse {id, file_url, upload_url}  (tiny, API key) ──▶ SaaS  (202)
 4. SaaS:      auth + meter, persist job, detect type
 5. SaaS queue:POST trigger-<type> {file_url, upload_url,
               webhook_url:<SaaS>, webhook_secret:<SaaS>}     ──▶ Modal  (202)
 6. Modal:     GET file_url (customer bucket) → parse
               → PUT markdown to upload_url (customer bucket) ──▶ customer bucket
 7. Modal   →  POST <SaaS> webhook {status, url, page_count}  ──▶ SaaS
-8. SaaS queue:verify, finalize metering, mark job done
-9. SaaS    →  POST customer webhook_url {id, status,
-              markdown_url, page_count, signature}           ──▶ customer app
-10. SDK webhook route: verify signature, fire ParseCompleted event
+8. SaaS queue:verify webhook_secret, finalize metering, mark job done
+9. SaaS    →  POST SDK webhook {id, status, markdown_url,
+              page_count} + HMAC signature (PARSE_WEBHOOK_SECRET) ──▶ customer app
+10. SDK webhook route: verify signature, look up parse_requests by id (idempotent),
+              mark completed, fire ParseCompleted event
 11. customer: handle the event (markdown is already in their bucket)
 ```
 
@@ -121,10 +125,31 @@ Notes:
 - **The SaaS proxies the webhook** (Modal → SaaS → customer) rather than letting Modal call
   the customer directly. This keeps Modal hidden, lets the SaaS record completion for
   billing, and gives the customer one stable, signed callback contract.
+- **Webhook auth is one signing secret** (`PARSE_WEBHOOK_SECRET`, HMAC, Stripe-style). The
+  per-request `webhook_secret` is internal to the Modal → SaaS hop only; it never reaches the
+  customer's table.
 - **The output is already in the customer's bucket** by the time the webhook fires — the
   callback just carries the URL + metadata, not the markdown body.
-- The SDK ships a **published webhook route** and a `ParseCompleted` event, so the developer
-  writes a listener, not a controller. No `webhook:` argument needed on `->queue()`.
+- The SDK ships a **published webhook route** and `ParseCompleted` / `ParseFailed` events, so
+  the developer writes a listener, not a controller. No `webhook:` argument on `->async()`.
+
+### Client SDK state — the `parse_requests` table
+
+The SDK ships a migration + Eloquent model so async submissions can be correlated and
+deduped without the developer handling ids or secrets:
+
+| column | purpose |
+|:--|:--|
+| `id` (uuid) | SDK-generated correlation handle; sent to the SaaS, echoed in the webhook |
+| `disk`, `source_path`, `output_path` | where the file is and where the markdown lands |
+| `status` | `pending` → `completed` / `failed` |
+| `page_count`, `error` | filled on completion |
+| `meta` (json) | customer-supplied context (e.g. `invoice_id`), returned in the event |
+| `created_at`, `completed_at` | timing / pruning |
+
+No secret column — webhook verification uses the single `PARSE_WEBHOOK_SECRET`. The webhook
+handler is idempotent (looks up by `id`, ignores already-completed rows) so duplicate
+deliveries are safe. `->async()` returns this model; the `ParseCompleted` event carries it.
 
 ## Queues (inside the SaaS)
 

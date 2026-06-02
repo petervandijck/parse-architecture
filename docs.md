@@ -60,16 +60,17 @@ Highlights:
 
 ## Installation
 
-### 1. Sign up & get your API key
+### 1. Sign up & get your keys
 
-Create an account at [parseforartisans.com](https://parseforartisans.com), add billing,
-and grab your API key from the dashboard. Keys look like:
+Create an account at [parseforartisans.com](https://parseforartisans.com), add billing, and
+grab two values from the dashboard: your **API key** and your **webhook signing secret**.
 
 ```
-pfa_...
+pfa_...      # API key
+whsec_...    # webhook signing secret (used to verify async callbacks)
 ```
 
-Keep it secret — it's the only credential you need.
+Keep them secret.
 
 ### 2. Install the package
 
@@ -77,19 +78,25 @@ Keep it secret — it's the only credential you need.
 composer require parseforartisans/laravel
 ```
 
-### 3. Add your key
-
-Add the key to your `.env`:
+### 3. Add your keys
 
 ```env
 PARSE_API_KEY=pfa_...
+PARSE_WEBHOOK_SECRET=whsec_...
 ```
 
-That's it — the package auto-registers. No config file required for the basics. To publish
-the config (timeouts, default disk, async webhook route) run:
+The API key is all you need for the **sync** flow. The webhook secret is used by the **async**
+flow to verify incoming callbacks.
+
+### 4. Publish config & migrate
+
+The package auto-registers — no config file required for sync. To use the **async** flow,
+publish the config and run the migration (it adds a small `parse_requests` table the SDK uses
+to track submissions and match them to webhooks):
 
 ```bash
 php artisan vendor:publish --tag=parse-config
+php artisan migrate
 ```
 
 ---
@@ -198,19 +205,18 @@ $markdown = Parse::file($path)
 
 ## Large files & bulk: the async flow
 
-The sync flow blocks until the parse finishes, so it's capped (e.g. **20 MB**). For large
-documents (up to **200 MB**) or when you're parsing tens of thousands of files at once, use
-the **async flow**.
+The sync flow blocks until the parse finishes, so it's capped (e.g. **20 MB**). Most of the time,
+you'll want to use the **async flow**. It doesn't block your app, and you can send large amounts of files.
 
-How it works: your file already lives in **your own S3 bucket**, and the parsed Markdown is
-written **back to your bucket** — your file bytes never pass through us. You just configure a
-disk; the SDK handles the presigned URLs, the webhook, and the secret for you. Submitting is
-near-instant (we only receive a tiny JSON payload). When the parse finishes we notify your
-app. No polling.
+- You ping the service (no need to queue this, it's a quick api call).
+- The SDK handles signing URLs, webhook, secrets etc.
+- A few minutes later you receive a Laravel event (through the webhook): your markdown is available.
 
 ### 1. Point the SDK at your bucket
 
-In `config/parse.php` (after `vendor:publish`), set the disk your documents live on:
+Make sure you've done the async setup from [Installation](#4-publish-config--migrate)
+(`PARSE_WEBHOOK_SECRET` + `php artisan migrate`), then set the disk your documents live on in
+`config/parse.php`:
 
 ```php
 'disk'   => 's3',        // any Laravel filesystem disk
@@ -220,22 +226,32 @@ In `config/parse.php` (after `vendor:publish`), set the disk your documents live
 By default the output mirrors the source path under `parsed/` — `contracts/foo.pdf` →
 `parsed/contracts/foo.md`. Override per-file with `->to(...)`.
 
-### 2. Queue the file
+### 2. Submit the file
 
 ```php
 use ParseForArtisans\Facades\Parse;
 
-Parse::file('contracts/foo.pdf')        // a path on your parse disk
-    ->to('contracts/foo.md')            // optional: defaults to parsed/contracts/foo.md
-    ->queue();
+$parse = Parse::file('contracts/foo.pdf')   // a path on your parse disk
+    ->to('contracts/foo.md')                // optional: defaults to parsed/contracts/foo.md
+    ->withMeta(['invoice_id' => $invoice->id])  // optional: your own context, returned later
+    ->async();
+
+$parse->id;      // a parse reference (uuid) the SDK tracks for you
+$parse->status;  // 'pending'
 ```
 
-This returns immediately with a job id.
+`->async()` is just a small, fast API call (we receive a tiny JSON payload — no file bytes),
+so **you can call it inline in a controller — you don't need Laravel's queue.** It returns a
+`ParseRequest` model the SDK persists, so you never juggle the id or webhook secret yourself.
+
+> Submitting **thousands** at once? That's the one time to reach for Laravel's queue —
+> wrap the `->async()` call in your own job so the submissions run in parallel with retries.
+> The SDK doesn't force a queue; it's your call.
 
 ### 3. Handle the result
 
-The package registers its own signed webhook route and fires a Laravel event when a parse
-completes — write a listener, not a controller:
+The package registers its own signed webhook route, verifies the callback, matches it back to
+your `ParseRequest`, and fires a Laravel event — write a listener, not a controller:
 
 ```php
 use ParseForArtisans\Events\ParseCompleted;
@@ -244,21 +260,19 @@ class StoreParsedDocument
 {
     public function handle(ParseCompleted $event): void
     {
-        $event->id;           // your job id
-        $event->path;         // 'parsed/contracts/foo.md' on your disk
-        $event->markdownUrl;  // public/presigned URL in your bucket
-        $event->pageCount;
+        $request = $event->request;            // the ParseRequest, now 'completed'
+        $request->meta['invoice_id'];          // your context, reunited
+        $request->output_path;                 // 'parsed/contracts/foo.md' on your disk
+        $request->page_count;
 
-        $markdown = Storage::disk('s3')->get($event->path);
+        $markdown = Storage::disk($request->disk)->get($request->output_path);
         // ...store, index, summarize
     }
 }
 ```
 
 The Markdown is already sitting in your bucket by the time the event fires — the callback
-just tells you it's ready.
-
-See [architecture.md](architecture.md) for the full end-to-end async flow.
+just tells you it's ready. (`ParseFailed` fires on errors, carrying `$request->error`.)
 
 ---
 
