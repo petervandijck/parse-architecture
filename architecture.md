@@ -35,6 +35,17 @@ customer app ──────▶ Client SDK ──────────▶ 
   URL, signed so the customer can verify it. **Async delivery is webhook-based — no
   polling.**
 
+## Client SDK input API
+
+The SDK speaks Laravel's **filesystem disk** language so paths are never hand-built:
+
+- `Parse::file('contract.pdf')` — path resolved against the configured default disk.
+- `Parse::disk('s3')->file('contracts/foo.pdf')` — explicit disk selector.
+- Absolute OS paths and `UploadedFile` instances are also accepted.
+
+This unifies sync and async: both take disk-relative paths, and the async flow reuses the
+same disk to presign the source GET + output PUT (see Flow B). One disk concept end to end.
+
 ## File-type routing
 
 The developer always just calls `->markdown()` regardless of format. **File-type detection
@@ -190,9 +201,12 @@ these are decided; we'll pick which gaps to close later.
 
 - **Office fidelity (biggest gap).** parsel uses **LibreOffice**, which does true
   layout-fidelity conversion and handles legacy `.doc`/`.ppt`. Our `mammoth` / `python-pptx`
-  / `openpyxl` are lightweight but lower-fidelity on complex documents, and we don't support
-  the legacy binary formats at all. *Option: a LibreOffice-backed "high-fidelity Office"
-  worker tier (fits the worker-tiers plan above).*
+  / `openpyxl` are lightweight but lower-fidelity on complex documents. *Option: a
+  LibreOffice-backed "high-fidelity Office" worker tier (fits the worker-tiers plan above).*
+- **Legacy `.doc`/`.ppt` + `.csv` (committed in the docs, not built yet).** The user docs now
+  advertise `.doc`, `.ppt`, and `.csv`. These need new backend paths: `.doc`/`.ppt` likely via
+  a **LibreOffice** worker (our pure-Python libs are `.docx`/`.pptx`-only); `.csv` is a trivial
+  add to the spreadsheet path. **To build in `parse-function`.**
 - **Standalone image OCR (clear hole).** parsel OCRs images (ImageMagick → PDF → Tesseract).
   Our image worker only **optimizes** (resize to JPEG) — it produces no text/markdown.
   *Option: add an image→markdown OCR path; cheap, obvious.*

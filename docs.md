@@ -23,9 +23,9 @@ nothing to configure per format.
 | Format | Extensions | What you get |
 |:--|:--|:--|
 | **PDF** | `.pdf` | Clean Markdown. **Scanned PDFs are OCR'd automatically** — no flag needed. |
-| **Word** | `.docx` | Markdown with headings, lists, and tables preserved. |
-| **PowerPoint** | `.pptx` | One `## Slide N` section per slide, including slide tables. |
-| **Excel** | `.xlsx` | Each sheet rendered as a Markdown table, one `## Sheet` per tab. |
+| **Word** | `.docx`, `.doc` | Markdown with headings, lists, and tables preserved. |
+| **PowerPoint** | `.pptx`, `.ppt` | One `## Slide N` section per slide, including slide tables. |
+| **Spreadsheet** | `.xlsx`, `.csv` | Each sheet (or the CSV) rendered as a Markdown table, one `## Sheet` per tab. |
 | **Email** | `.eml`, `.msg` | Headers (from/to/subject/date) as YAML frontmatter, body text, and an attachment list. |
 
 Highlights:
@@ -53,7 +53,7 @@ Highlights:
 - **Private by design.** In the async flow your file bytes never pass through us: your bucket
   in, your bucket out.
 
-> Legacy `.doc` and `.ppt` (the pre-2007 binary formats) aren't supported — only the modern
+> Legacy `.doc` / `.ppt` (the pre-2007 binary formats) are supported alongside the modern
 > `.docx` / `.pptx`. More formats are on the way.
 
 ---
@@ -66,7 +66,7 @@ Create an account at [parseforartisans.com](https://parseforartisans.com), add b
 and grab your API key from the dashboard. Keys look like:
 
 ```
-pfa_live_a1b2c3d4e5f6g7h8i9j0
+pfa_...
 ```
 
 Keep it secret — it's the only credential you need.
@@ -82,7 +82,7 @@ composer require parseforartisans/laravel
 Add the key to your `.env`:
 
 ```env
-PARSE_API_KEY=pfa_live_a1b2c3d4e5f6g7h8i9j0
+PARSE_API_KEY=pfa_...
 ```
 
 That's it — the package auto-registers. No config file required for the basics. To publish
@@ -129,13 +129,17 @@ Add `--save=out.md` to write the result to a file instead of printing it.
 
 ### Parse a file
 
-Use the `Parse` facade. It takes a path (or an `UploadedFile`):
+Use the `Parse` facade. It takes a path on your filesystem disk (or an `UploadedFile`):
 
 ```php
 use ParseForArtisans\Facades\Parse;
 
-$markdown = Parse::file(storage_path('app/contract.pdf'))->markdown();
+$markdown = Parse::file('contract.pdf')->markdown();           // default disk
+$markdown = Parse::disk('s3')->file('contracts/foo.pdf')->markdown();
 ```
+
+Paths resolve against your configured disk (just like `Storage::get()`), so you never
+hand-build an OS path. Absolute filesystem paths and `UploadedFile` instances work too.
 
 ### Parse a URL
 
