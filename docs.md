@@ -31,8 +31,8 @@ class HandleParsedDocument
 
 1. **`->parse()`** hands us the job and returns a `ParseRequest` handle right away.
 2. We parse the document and write the Markdown straight to your bucket.
-3. When it's done, you get a **`ParseCompleted`** Laravel event. The Markdown is already
-   waiting; the event just tells you it's ready and hands you the `ParseRequest`.
+3. We ping a webhook and you get a **`ParseCompleted`** Laravel event. The Markdown is already
+   ready.
 
 Our SDK handles webhooks, secrets, presigned URLs.
 
