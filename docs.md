@@ -5,15 +5,13 @@ Turn PDFs, Word docs, spreadsheets, and more into clean Markdown — built for L
 ```php
 use ParseForArtisans\Facades\Parse;
 
-// Works on any format (docx, xlsx, ...), returns immediately.
 $document = Parse::file('contract.pdf')->parse();
-
 $document->status();  // 'pending', 'completed'
 ```
 
 The result arrives via a Laravel event when it's ready. The SDK publishes a listener that you can customize
 ```php
-// Customize this listener— app/Listeners/HandleParsedDocument.php:
+// app/Listeners/HandleParsedDocument.php:
 use ParseForArtisans\Events\ParseCompleted;
 
 class HandleParsedDocument
