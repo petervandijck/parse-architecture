@@ -8,11 +8,11 @@ overview and open decisions.
 
 | # | System | What it is | Owns |
 |---|--------|-----------|------|
-| 1 | **Client SDK** | Composer package the customer installs (`composer require ...`) | The `Parse::file()` / `->markdown()` / `->async()` surface. Talks only to the SaaS API over HTTPS with the customer's API key. For async, owns a `parse_requests` table (correlation + status) and a signed webhook route. |
-| 2 | **SaaS app** | The Laravel application we run at parseforartisans.com | Auth, API keys, billing/metering, file storage, presigned URLs, file-type detection & routing, calling Modal, receiving Modal's webhook, serving results back to the SDK, customer webhooks. |
+| 1 | **Client SDK** | Composer package the customer installs (`composer require ...`) | The `Parse::file()->parse()` / `->status()` / `->markdown()` surface + `ParseCompleted`/`ParseFailed` events. Talks only to the SaaS API over HTTPS with the customer's API key. Owns a `parse_requests` table (correlation + status), a signed webhook route (webhook delivery), and a self-releasing poll job (poll delivery). |
+| 2 | **SaaS app** | The Laravel application we run at parseforartisans.com | Auth, API keys, billing/metering, presigned URLs, file-type detection & routing, calling Modal, receiving Modal's webhook, the status endpoint, customer webhooks. Hosts the managed dev bucket. |
 | 3 | **Parse backend** | Existing Modal serverless workers (`../parse-function`) | The actual parse. One endpoint per file type. Fully async. Never customer-facing. |
-| 4 | **Queue** | Laravel queue (Redis/SQS) inside the SaaS app | Async/bulk jobs: dispatching to Modal, handling the Modal webhook, firing the customer webhook. |
-| 5 | **Object storage** | Async: the **customer's** bucket. Sync: ephemeral SaaS-internal scratch. | Async: the SDK presigns `file_url` (GET) + `upload_url` (PUT) on the customer's own disk; the SaaS never touches bytes. Sync: the customer sends bytes (or a URL); the SaaS uses short-lived internal scratch and returns the markdown inline — no customer bucket. |
+| 4 | **Queue** | Laravel queue (Redis/SQS) inside the SaaS app | Dispatching to Modal, handling the Modal webhook, firing the customer webhook. (A separate poll job runs on the *customer's* queue, owned by the SDK — see Delivery.) |
+| 5 | **Object storage** | Default: the **customer's** bucket (BYO). Dev: a SaaS-hosted **managed bucket**. | BYO: the SDK presigns `file_url` (GET) + `upload_url` (PUT) on the customer's own disk; the SaaS never touches bytes. Managed: SaaS-hosted, quota-limited, ~1-day retention — for local dev with no bucket; the customer uploads bytes to us, the result lands with us, and `->markdown()` fetches it via the API. |
 
 ```
    composer require            HTTPS + API key            HTTP (Bearer secret)
@@ -31,83 +31,39 @@ customer app ──────▶ Client SDK ──────────▶ 
   exposed to customers.
 - **Modal ↔ SaaS (webhook):** Modal POSTs back with a per-request **`webhook_secret`** the
   SaaS generated; the SaaS verifies it before trusting the callback.
-- **SaaS ↔ Customer (async result):** the SaaS POSTs the result to the SDK's webhook route,
-  **HMAC-signed with a single per-account signing secret** (`PARSE_WEBHOOK_SECRET`,
-  Stripe-style). The SDK verifies the signature against that one config value — no per-request
-  secret is stored on the customer side. **Async delivery is webhook-based — no polling.**
+- **SaaS ↔ Customer (result):** under `webhook` delivery the SaaS POSTs the result to the
+  SDK's webhook route, **HMAC-signed with a single per-account signing secret**
+  (`PARSE_WEBHOOK_SECRET`, Stripe-style). The SDK verifies the signature against that one
+  config value — no per-request secret is stored on the customer side. Under `poll` delivery
+  (local dev) the SDK instead reads the result from the authenticated `GET /v1/parse/{id}`
+  status endpoint. See "Delivery" below.
 
 ## Client SDK input API
 
-The SDK speaks Laravel's **filesystem disk** language so paths are never hand-built:
-
-- `Parse::file('contract.pdf')` — path resolved against the configured default disk.
-- `Parse::disk('s3')->file('contracts/foo.pdf')` — explicit disk selector.
-- Absolute OS paths and `UploadedFile` instances are also accepted.
-
-This unifies sync and async: both take disk-relative paths, and the async flow reuses the
-same disk to presign the source GET + output PUT (see Flow B). One disk concept end to end.
+The SDK speaks Laravel's **filesystem disk** language (`docs.md` covers the call forms). The
+architectural point: the same configured disk is reused to presign the source GET + output PUT
+(see "The parse flow") and is the one knob that selects BYO vs. the managed dev bucket — one
+disk concept end to end.
 
 ## File-type routing
 
-The developer always just calls `->markdown()` regardless of format. **File-type detection
-and Modal endpoint routing live in the SaaS app** (by extension + MIME sniff), so the SDK
-stays dumb and the customer never thinks about PDF-vs-docx-vs-xlsx. *(Final placement to be
-confirmed — leaning SaaS.)*
+**File-type detection and Modal endpoint routing live in the SaaS app** (by extension + MIME
+sniff), so the SDK stays dumb and the customer just calls `->parse()` regardless of format.
+*(Final placement to be confirmed — leaning SaaS.)*
 
-> **Async (Flow B) is the recommended default** in the product/docs; sync (Flow A) is framed
-> as the quick exception for a single small document a user is waiting on. The method
-> semantics stay honest: `->markdown()` returns a string (sync), `->async()` returns a handle.
+## The parse flow (`->parse()`)
 
-## Flow A — Sync / blocking (`->markdown()`)
+One mode: always async. There is a single flow; two axes vary underneath it — **where the bytes
+live** (storage) and **how the result reaches the app** (delivery) — but the customer's code is
+identical in every case.
 
-For the simple, interactive case. **Zero buckets for the customer** — they send the file
-bytes (a multipart upload) *or* a URL, and get the markdown string back in the same HTTP
-response. The SDK blocks; **the SaaS holds the request open** until Modal finishes. The only
-storage involved is **ephemeral, SaaS-internal** — the customer never configures or sees it.
-
-```
-1. customer:  $md = $request->file('doc')->markdown();      // or Parse::url($href)->markdown()
-2. SDK     →  POST /v1/parse (multipart bytes OR { url }, API key)  ──▶ SaaS
-3. SaaS:      auth + meter, detect type, stash bytes in scratch storage,
-              presign internal file_url + upload_url (ephemeral)
-4. SaaS    →  POST trigger-<type> {file_url, upload_url,
-              webhook_url, webhook_secret}                   ──▶ Modal   (202)
-5. Modal:     download, parse, PUT markdown to upload_url    ──▶ SaaS scratch
-6. Modal   →  POST webhook_url {status, url, ...}            ──▶ SaaS
-7. SaaS:      verify webhook_secret, read markdown from scratch,
-              record usage, discard scratch files
-8. SaaS    →  200 { markdown: "..." }                        ──▶ SDK
-9. SDK     →  returns the string to the customer
-```
-
-Notes:
-- The customer sends **bytes or a URL** — no presigning, no bucket config. This is the
-  difference from Flow B, where the customer's own bucket holds both ends.
-- Scratch storage is SaaS-internal and short-lived (deleted after the response). Capped at
-  the sync size limit (e.g. 20 MB) precisely because we hold it in our request path.
-- A request-scoped timeout caps the wait; on timeout the SDK gets a clear "still processing,
-  use async" error. Step 6→8 correlation (cache key on `webhook_secret`, or short internal
-  poll of the job record) is a SaaS implementation detail.
-
-## Flow B — Async, bring-your-own-bucket (`->async()`)
-
-**This is the recommended async flow** for large files (up to **1 GB**) and bulk
-imports (tens of thousands of files at once; the Modal backend is built for these bursts).
-
-The key property: **the SaaS never touches the file bytes.** The customer's file already
-lives in their own bucket. The SDK presigns a GET (the source) and a PUT (where the output
-should land), generates a webhook secret, and POSTs a *tiny* JSON payload. The parse runs,
-and the markdown lands **back in the customer's own bucket**. Fast to submit, private (data
-never transits us), cheap (no storage on our side).
-
-The SDK owns all the plumbing. The developer only configures a **disk** — the SDK generates
-the presigned URLs, persists a `ParseRequest` row for correlation, and handles the webhook
-route automatically. **No polling.** Note: `->async()` is a fast inline HTTP call (tiny
-payload) — it does **not** require Laravel's queue. Customers reach for their own queue only
-to fan out bulk submissions.
+The SDK owns all the plumbing: it mints the id, presigns URLs, persists a `ParseRequest` row,
+and either runs a webhook route or a poll job to deliver the event. `->parse()` is a fast
+inline HTTP call (tiny payload) — it does **not** require Laravel's queue to submit; customers
+reach for their own queue only to fan out bulk submissions.
 
 ```
-1. customer:  $parse = Parse::file('contracts/foo.pdf')->async();   // path on their parse disk
+1. customer:  $parse = Parse::file('contracts/foo.pdf')->parse();   // path on their parse disk
 2. SDK:       mint id (uuid), presign GET file_url + PUT upload_url on the
               customer's bucket, INSERT parse_requests row (status=pending)
 3. SDK     →  POST /v1/parse {id, file_url, upload_url}  (tiny, API key) ──▶ SaaS  (202)
@@ -118,9 +74,8 @@ to fan out bulk submissions.
               → PUT markdown to upload_url (customer bucket) ──▶ customer bucket
 7. Modal   →  POST <SaaS> webhook {status, url, page_count}  ──▶ SaaS
 8. SaaS queue:verify webhook_secret, finalize metering, mark job done
-9. SaaS    →  POST SDK webhook {id, status, markdown_url,
-              page_count} + HMAC signature (PARSE_WEBHOOK_SECRET) ──▶ customer app
-10. SDK webhook route: verify signature, look up parse_requests by id (idempotent),
+9.            ── delivery to the customer (webhook or poll — see below) ──
+10. SDK:      verify, look up parse_requests by id (idempotent),
               mark completed, fire ParseCompleted event
 11. customer: handle the event (markdown is already in their bucket)
 ```
@@ -129,17 +84,48 @@ Notes:
 - **The SaaS proxies the webhook** (Modal → SaaS → customer) rather than letting Modal call
   the customer directly. This keeps Modal hidden, lets the SaaS record completion for
   billing, and gives the customer one stable, signed callback contract.
-- **Webhook auth is one signing secret** (`PARSE_WEBHOOK_SECRET`, HMAC, Stripe-style). The
-  per-request `webhook_secret` is internal to the Modal → SaaS hop only; it never reaches the
-  customer's table.
-- **The output is already in the customer's bucket** by the time the webhook fires — the
-  callback just carries the URL + metadata, not the markdown body.
-- The SDK ships a **published webhook route** and `ParseCompleted` / `ParseFailed` events, so
-  the developer writes a listener, not a controller. No `webhook:` argument on `->async()`.
-- **Batch submit:** `Parse::files([...])->async()` presigns each file, INSERTs one
+- **The output is already in the bucket** by the time the event fires — the result carries the
+  URL + metadata, not the markdown body. `->markdown()` reads it (from the customer bucket
+  directly, or via the API for the managed bucket).
+- The SDK ships the `ParseCompleted` / `ParseFailed` events, so the developer writes a
+  listener, not a controller. No `webhook:` argument on `->parse()`.
+- **Batch submit:** `Parse::files([...])->parse()` presigns each file, INSERTs one
   `parse_requests` row per file, and sends them as a single batch payload to the SaaS, which
   fans out one Modal trigger per file. Returns a collection of `ParseRequest`. Each file gets
-  its own webhook + `ParseCompleted` event — the result path is identical to single-file.
+  its own event — the result path is identical to single-file.
+
+### Storage — BYO bucket (default) vs. managed dev bucket
+
+| | BYO bucket (default / prod) | Managed dev bucket |
+|:--|:--|:--|
+| **Source bytes** | already in the customer's bucket; SDK presigns a GET | customer uploads to the SaaS |
+| **Output** | PUT back to the customer's bucket; **SaaS never touches bytes** | held by the SaaS |
+| **`->markdown()` reads** | the customer disk directly | the SaaS API |
+
+Selected by the configured disk — `parse.disk` set → BYO, unset → managed (the zero-config
+fallback, so a fresh install parses with no bucket setup). Limits/retention live in `docs.md`.
+
+### Delivery — webhook (default) vs. poll (local)
+
+Both paths fire the **same** `ParseCompleted`/`ParseFailed` event; only the transport differs.
+`parse.delivery` selects it: `auto` (default) resolves to **`poll` when `APP_ENV=local`,
+`webhook` everywhere else** (staging, production, …).
+
+- **`webhook`** — at step 9 the SaaS POSTs `{id, status, markdown_url, page_count}` to the
+  SDK's published route, **HMAC-signed with the single per-account `PARSE_WEBHOOK_SECRET`**
+  (Stripe-style). The SDK verifies the signature and fires the event. Reactive; no queue. The
+  per-request `webhook_secret` is internal to the Modal → SaaS hop only — it never reaches the
+  customer's table.
+- **`poll`** — for local dev, where the SaaS can't reach an inbound webhook. `->parse()`
+  dispatches a self-releasing job onto the customer's queue; it polls `GET /v1/parse/{id}`,
+  `release()`s itself while `pending`, and fires the same event on a terminal status. Needs a
+  real queue driver (`database`/`redis`, not `sync`); rides the `queue:listen` worker that
+  Laravel's `composer run dev` already runs. A capped attempt count / TTL fires `ParseFailed`
+  if the job never completes, so the event always eventually arrives.
+
+**`->status()` reads the local `parse_requests` row** (a DB read, not an API call); the row is
+kept current by whichever delivery is active. Consequence: locally it only advances while a
+worker runs the poll job. It reports progress only — the result is delivered by the event.
 
 ### Client SDK state — the `parse_requests` table
 
@@ -155,18 +141,25 @@ deduped without the developer handling ids or secrets:
 | `meta` (json) | customer-supplied context (e.g. `invoice_id`), returned in the event |
 | `created_at`, `completed_at` | timing / pruning |
 
-No secret column — webhook verification uses the single `PARSE_WEBHOOK_SECRET`. The webhook
-handler is idempotent (looks up by `id`, ignores already-completed rows) so duplicate
-deliveries are safe. `->async()` returns this model; the `ParseCompleted` event carries it.
+No secret column — webhook verification uses the single `PARSE_WEBHOOK_SECRET`. Delivery is
+idempotent (looks up by `id`, ignores already-terminal rows) so duplicate deliveries — and the
+webhook/poll paths never running together — are safe. `->parse()` returns this model; the
+`ParseCompleted` event carries it; `->status()` reads its `status` column.
 
-## Queues (inside the SaaS)
+## Queues
 
-- **dispatch-to-modal** — POST the right `trigger-<type>` endpoint with the customer's
-  presigned URLs (the SaaS does not presign or touch bytes in the async flow).
+**Inside the SaaS:**
+- **dispatch-to-modal** — POST the right `trigger-<type>` endpoint with the presigned URLs
+  (for BYO, the SaaS does not presign or touch bytes).
 - **handle-modal-webhook** — verify `webhook_secret`, update job, meter usage. (Markdown is
-  already in the customer's bucket; the SaaS only reads metadata.)
-- **notify-customer** — sign and POST to the customer's webhook; retry with backoff.
+  already in the bucket; the SaaS only reads metadata.)
+- **notify-customer** (webhook delivery) — sign and POST to the customer's webhook; retry with
+  backoff.
 - Built to absorb Modal's burst profile (`max_containers=100` per worker upstream).
+
+**On the customer side (SDK):** the **poll-parse-status** job exists only under `poll`
+delivery (local dev) — it polls `GET /v1/parse/{id}` and fires the event. It runs on the
+customer's own queue and is never used when delivery is `webhook`.
 
 ## Scaling the parse backend — worker tiers & large documents (TBD)
 
@@ -306,8 +299,6 @@ cost is the output plumbing and a new API/SDK contract.
 
 ## Still open (see CLAUDE.md)
 
-- Storage model: SaaS-managed S3 vs. bring-your-own bucket.
-- Sync-wait mechanism details (hold-open vs. internal short poll) and timeout policy.
 - Pricing/metering unit (page / file / MB).
 - Final home of file-type detection (leaning SaaS).
 - Worker tiers + where size-based routing lives (SaaS-side vs. Modal-side); chunked parsing
