@@ -29,14 +29,15 @@ class HandleParsedDocument
 
 ## How it works
 
-One flow, start to finish:
-
 1. **`->parse()`** hands us the job and returns a `ParseRequest` handle right away.
-2. We parse the document and write the Markdown **straight to your bucket**.
-3. When it's done, you get a **`ParseCompleted` Laravel event**. The Markdown is already
+2. We parse the document and write the Markdown straight to your bucket.
+3. When it's done, you get a **`ParseCompleted`** Laravel event. The Markdown is already
    waiting; the event just tells you it's ready and hands you the `ParseRequest`.
 
-Our SDK handles webhooks, secrets, presigned URLs, all of it.
+Our SDK handles webhooks, secrets, presigned URLs.
+
+> For local development, if you're running a queue (**`composer dev`** works) it will just work.
+> No need to set up webhook endpoints etc.
 
 ---
 
