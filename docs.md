@@ -25,29 +25,18 @@ class HandleParsedDocument
 }
 ```
 
-That's the whole shape: **`->parse()` to submit, a `ParseCompleted` event when the Markdown is
-ready.** Parsing a real document takes anywhere from a few seconds to a few minutes, so it
-never blocks your app — you hand us the file and get on with the request.
-
-> **Need to show a user the result while they wait?** Don't block the request — submit with
-> `->parse()` and poll [`->status()`](#checking-status) from your frontend until it flips to
-> `completed`, then display the Markdown.
-
 ---
 
 ## How it works
 
 One flow, start to finish:
 
-1. **`->parse()`** hands us the job and returns a `ParseRequest` handle right away. It's a
-   small, fast API call — **you can call it inline in a controller; you don't need Laravel's
-   queue.**
-2. We parse the document and write the Markdown **straight to your bucket** (or our managed
-   dev bucket — see [Local development](#local-development)).
+1. **`->parse()`** hands us the job and returns a `ParseRequest` handle right away.
+2. We parse the document and write the Markdown **straight to your bucket**.
 3. When it's done, you get a **`ParseCompleted` Laravel event**. The Markdown is already
    waiting; the event just tells you it's ready and hands you the `ParseRequest`.
 
-You never juggle ids, secrets, presigned URLs, or webhook routes — the SDK owns all of it.
+Our SDK handles webhooks, secrets, presigned URLs, all of it.
 
 ---
 
@@ -55,7 +44,7 @@ You never juggle ids, secrets, presigned URLs, or webhook routes — the SDK own
 
 ### 1. Sign up & get your keys
 
-Create an account at [parseforartisans.com](https://parseforartisans.com), add billing, and
+Create an account at [parseforartisans.com](https://parseforartisans.com), and
 grab two values from the dashboard: your **API key** and your **webhook signing secret**.
 
 ```
