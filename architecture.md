@@ -88,9 +88,8 @@ Notes:
   URL + metadata, not the markdown body. `->markdown()` reads it (from the customer bucket
   directly, or via the API for the managed bucket).
 - The SDK ships the `ParseCompleted` / `ParseFailed` events and publishes editable listener
-  stubs (`vendor:publish --tag=parse-listeners`, auto-discovered on Laravel 12/13), so the
-  developer customizes a listener rather than writing a controller. No `webhook:` argument on
-  `->parse()`.
+  stubs (via `php artisan parse:install`, auto-discovered on Laravel 12/13), so the developer
+  customizes a listener rather than writing a controller. No `webhook:` argument on `->parse()`.
 - **Batch submit:** `Parse::files([...])->parse()` presigns each file, INSERTs one
   `parse_requests` row per file, and sends them as a single batch payload to the SaaS, which
   fans out one Modal trigger per file. Returns a collection of `ParseRequest`. Each file gets

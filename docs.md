@@ -68,17 +68,16 @@ PARSE_API_KEY=pfa_...
 PARSE_WEBHOOK_SECRET=whsec_...
 ```
 
-### 4. Publish config, listeners & migrate
+### 4. Run the installer
 
 ```bash
-php artisan vendor:publish --tag=parse-config
-php artisan vendor:publish --tag=parse-listeners   # ready-to-edit event listeners
-php artisan migrate
+php artisan parse:install
 ```
 
-The migration adds a small `parse_requests` table the SDK uses to track submissions and match
-results back to them — so you never handle ids or secrets yourself. The listeners land in
-`app/Listeners/` (`HandleParsedDocument`, `HandleFailedParse`), ready for you to fill in — see
+One command does it all: publishes `config/parse.php`, drops the event listeners into
+`app/Listeners/` (`HandleParsedDocument`, `HandleFailedParse`), and runs the migration that adds
+a small `parse_requests` table the SDK uses to track submissions and match results back to them
+— so you never handle ids or secrets yourself. Customize the listeners later — see
 [Handling the result](#handling-the-result).
 
 `config/parse.php`:
@@ -199,8 +198,8 @@ You never write webhook-handling code. The SDK ships the route, verifies the sig
 and matches it back to your `ParseRequest` — then fires a Laravel event. All you write is what
 to *do* with a finished document.
 
-And you don't even start from scratch: the publish step in [Installation](#4-publish-config-listeners--migrate)
-dropped a listener into `app/Listeners/HandleParsedDocument.php`. Open it and fill in the body:
+And you don't even start from scratch: [`parse:install`](#4-run-the-installer) dropped a
+listener into `app/Listeners/HandleParsedDocument.php`. Open it and fill in the body:
 
 ```php
 <?php
