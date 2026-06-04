@@ -5,20 +5,20 @@ Turn PDFs, Word docs, spreadsheets, and more into clean Markdown — built for L
 ```php
 use ParseForArtisans\Facades\Parse;
 
-// Submit a file. Returns immediately with a handle — parsing runs in the background.
-// Works on any format; we detect the type. (Try playbook.docx, revenue.xlsx, ...)
+// Works on any format (docx, xlsx, ...), returns immediately.
 $document = Parse::file('contract.pdf')->parse();
 
-$document->id;        // a parse reference (uuid) the SDK tracks for you
-$document->status();  // 'pending'
+$document->status();  // 'pending', 'completed'
 ```
 
+The result arrives via a Laravel event when it's ready. The SDK publishes a listener that you can customize
 ```php
-// The result arrives via a Laravel event when it's ready — write a listener.
+// Customize this listener— app/Listeners/HandleParsedDocument.php:
 use ParseForArtisans\Events\ParseCompleted;
 
-class StoreParsedDocument
+class HandleParsedDocument
 {
+    // This event fires when parsing is finished
     public function handle(ParseCompleted $event): void
     {
         $markdown = $event->request->markdown();
@@ -31,59 +31,9 @@ That's the whole shape: **`->parse()` to submit, a `ParseCompleted` event when t
 ready.** Parsing a real document takes anywhere from a few seconds to a few minutes, so it
 never blocks your app — you hand us the file and get on with the request.
 
-Point it at one file or tens of thousands; the same two steps handle both.
-
-```php
-// A whole batch — one handle per file, each fires its own event as it finishes.
-$paths = Storage::disk('s3')->files('contracts');   // ['contracts/1.pdf', 'contracts/2.docx', ...]
-$batch = Parse::disk('s3')->files($paths)->parse();
-```
-
 > **Need to show a user the result while they wait?** Don't block the request — submit with
 > `->parse()` and poll [`->status()`](#checking-status) from your frontend until it flips to
 > `completed`, then display the Markdown.
-
----
-
-## What it supports
-
-You call `->parse()` on anything below — we detect the type and route it for you. There's
-nothing to configure per format.
-
-| Format | Extensions | What you get |
-|:--|:--|:--|
-| **PDF** | `.pdf` | Clean Markdown. **Scanned PDFs are OCR'd automatically** — no flag needed. |
-| **Word** | `.docx`, `.doc` | Markdown with headings, lists, and tables preserved. |
-| **PowerPoint** | `.pptx`, `.ppt` | One `## Slide N` section per slide, including slide tables. |
-| **Spreadsheet** | `.xlsx`, `.csv` | Each sheet (or the CSV) rendered as a Markdown table, one `## Sheet` per tab. |
-| **Email** | `.eml`, `.msg` | Headers (from/to/subject/date) as YAML frontmatter, body text, and an attachment list. |
-
-Highlights:
-
-- **Automatic OCR.** Scanned or image-only PDFs are detected and run through OCR — you don't
-  pick a mode.
-- **Multi-column layouts.** Two- and multi-column pages (think scientific papers) are read in
-  the correct reading order, not jumbled left-to-right across columns.
-- **Tables.** Tables are detected and emitted as proper Markdown tables.
-- **Document structure.** Headings, lists, bold/italic, and code blocks come through as real
-  Markdown — not a flat wall of text.
-- **Hyperlinks preserved.** Links in the source stay as Markdown links in the output.
-- **Email fields & attachments.** Email comes back with from/to/subject/date as frontmatter,
-  the body, and a list of attachments (name + size).
-- **Type auto-detection.** You never pass a format; we sniff it from the file.
-- **Optional frontmatter.** Add `->frontmatter()` to prepend YAML metadata (author, dates,
-  page/slide/sheet counts).
-- **Page ranges.** Parse just the pages you want with `->pages('1-20')`.
-- **Large files.** Documents up to **1 GB** each.
-- **Massive bulk.** Queue **tens of thousands of files at once** — the backend scales out to
-  absorb the burst and writes each result straight back to your bucket.
-- **One consistent format.** Every input type — PDF, Word, Excel, email — comes out as the
-  same clean Markdown.
-- **Private by design.** With your own bucket, your file bytes never pass through us: your
-  bucket in, your bucket out.
-
-> Legacy `.doc` / `.ppt` (the pre-2007 binary formats) are supported alongside the modern
-> `.docx` / `.pptx`. More formats are on the way.
 
 ---
 
@@ -130,15 +80,18 @@ PARSE_API_KEY=pfa_...
 PARSE_WEBHOOK_SECRET=whsec_...
 ```
 
-### 4. Publish config & migrate
+### 4. Publish config, listeners & migrate
 
 ```bash
 php artisan vendor:publish --tag=parse-config
+php artisan vendor:publish --tag=parse-listeners   # ready-to-edit event listeners
 php artisan migrate
 ```
 
 The migration adds a small `parse_requests` table the SDK uses to track submissions and match
-results back to them — so you never handle ids or secrets yourself.
+results back to them — so you never handle ids or secrets yourself. The listeners land in
+`app/Listeners/` (`HandleParsedDocument`, `HandleFailedParse`), ready for you to fill in — see
+[Handling the result](#handling-the-result).
 
 `config/parse.php`:
 
@@ -252,58 +205,69 @@ public function store(Request $request)
 You don't tell us the file type — we detect it (PDF, Word, PowerPoint, Excel, email, and more)
 and route it automatically.
 
-### Parse a whole batch
-
-Hand `Parse::files()` an array (or collection) of paths. They're submitted as one batch and
-you get back a collection of `ParseRequest` models — one per file:
-
-```php
-$paths = Storage::disk('s3')->files('contracts');
-
-$batch = Parse::disk('s3')->files($paths)
-    ->frontmatter(true)        // options apply to every file in the batch
-    ->parse();
-
-$batch->count();               // how many were submitted
-$batch->pluck('id');           // the parse references the SDK is tracking
-```
-
-Each file fires its own `ParseCompleted` event as it finishes — so you handle results the same
-way whether you submitted one file or ten thousand.
-
-> Submitting **thousands** at once? Wrap the `->parse()` call in your own queued job so the
-> submissions run in the background with retries. The SDK doesn't force a queue; it's your call.
-
----
-
 ## Handling the result
 
-The package registers a signed webhook route, verifies the callback, matches it back to your
-`ParseRequest`, and fires a Laravel event — write a listener, not a controller:
+You never write webhook-handling code. The SDK ships the route, verifies the signed callback,
+and matches it back to your `ParseRequest` — then fires a Laravel event. All you write is what
+to *do* with a finished document.
+
+And you don't even start from scratch: the publish step in [Installation](#4-publish-config-listeners--migrate)
+dropped a listener into `app/Listeners/HandleParsedDocument.php`. Open it and fill in the body:
 
 ```php
+<?php
+
+namespace App\Listeners;
+
 use ParseForArtisans\Events\ParseCompleted;
 
-class StoreParsedDocument
+class HandleParsedDocument
 {
+    /**
+     * Create the event listener.
+     */
+    public function __construct() {}
+
+    /**
+     * Handle the event.
+     */
     public function handle(ParseCompleted $event): void
     {
-        $request = $event->request;          // the ParseRequest, now 'completed'
-        $request->meta['invoice_id'];        // your context, reunited
-        $request->page_count;
+        $document = $event->request;          // the ParseRequest, now 'completed'
+        $markdown = $document->markdown();    // the parsed Markdown
 
-        $markdown = $request->markdown();    // reads from your bucket (or fetches the managed copy)
-
-        // ...store, index, summarize
+        // Your logic — store it, index it, send it to an LLM, notify the user…
+        // $document->meta['invoice_id'] and $document->page_count are here too.
     }
 }
 ```
 
-`ParseFailed` fires on errors, carrying `$request->error`. Register both like any Laravel event
-listener.
+On **Laravel 12 and 13 this listener is auto-discovered** — it's live the moment the file
+exists, with nothing to register. A companion `HandleFailedParse` stub is published for errors:
 
-> `$request->markdown()` reads the result from your bucket. You can also go straight to the
-> file yourself: `Storage::disk($request->disk)->get($request->output_path)`.
+```php
+<?php
+
+namespace App\Listeners;
+
+use ParseForArtisans\Events\ParseFailed;
+
+class HandleFailedParse
+{
+    public function handle(ParseFailed $event): void
+    {
+        report("Parse failed: {$event->request->error}");
+        // Your logic — flag the document, alert someone, queue a retry…
+    }
+}
+```
+
+> **Prefer to wire your own?** Skip the publish and write any listener for `ParseCompleted` /
+> `ParseFailed` — they're auto-discovered the same way. The published stubs are just a head
+> start; once published they're yours, so a later SDK update won't overwrite them.
+
+> `$document->markdown()` reads the result from your bucket (or fetches the managed copy). You
+> can also go straight to the file: `Storage::disk($document->disk)->get($document->output_path)`.
 
 ---
 
@@ -330,6 +294,30 @@ $label = match ($document->status()) {
 Drive a progress badge or a Livewire/polling spinner with it. `->status()` only tells you *where
 the job is* — it never fetches the Markdown. The result still arrives through the
 `ParseCompleted` event.
+
+---
+
+## Batch processing
+
+Hand `Parse::files()` an array (or collection) of paths instead of a single file. They're
+submitted as one batch and you get back a collection of `ParseRequest` models — one per file:
+
+```php
+$paths = Storage::disk('s3')->files('contracts');
+
+$batch = Parse::disk('s3')->files($paths)
+    ->frontmatter(true)        // options apply to every file in the batch
+    ->parse();
+
+$batch->count();               // how many were submitted
+$batch->pluck('id');           // the parse references the SDK is tracking
+```
+
+Each file fires its own `ParseCompleted` event as it finishes — so your published listener
+handles results the same way whether you submitted one file or ten thousand.
+
+> Submitting **thousands** at once? Wrap the `->parse()` call in your own queued job so the
+> submissions run in the background with retries. The SDK doesn't force a queue; it's your call.
 
 ---
 
@@ -395,6 +383,48 @@ public function handle(ParseCompleted $event): void
     $summary = AI::text("Summarize this contract:\n\n{$markdown}")->text();
 }
 ```
+
+---
+
+## What it supports
+
+You call `->parse()` on anything below — we detect the type and route it for you. There's
+nothing to configure per format.
+
+| Format | Extensions | What you get |
+|:--|:--|:--|
+| **PDF** | `.pdf` | Clean Markdown. **Scanned PDFs are OCR'd automatically** — no flag needed. |
+| **Word** | `.docx`, `.doc` | Markdown with headings, lists, and tables preserved. |
+| **PowerPoint** | `.pptx`, `.ppt` | One `## Slide N` section per slide, including slide tables. |
+| **Spreadsheet** | `.xlsx`, `.csv` | Each sheet (or the CSV) rendered as a Markdown table, one `## Sheet` per tab. |
+| **Email** | `.eml`, `.msg` | Headers (from/to/subject/date) as YAML frontmatter, body text, and an attachment list. |
+
+Highlights:
+
+- **Automatic OCR.** Scanned or image-only PDFs are detected and run through OCR — you don't
+  pick a mode.
+- **Multi-column layouts.** Two- and multi-column pages (think scientific papers) are read in
+  the correct reading order, not jumbled left-to-right across columns.
+- **Tables.** Tables are detected and emitted as proper Markdown tables.
+- **Document structure.** Headings, lists, bold/italic, and code blocks come through as real
+  Markdown — not a flat wall of text.
+- **Hyperlinks preserved.** Links in the source stay as Markdown links in the output.
+- **Email fields & attachments.** Email comes back with from/to/subject/date as frontmatter,
+  the body, and a list of attachments (name + size).
+- **Type auto-detection.** You never pass a format; we sniff it from the file.
+- **Optional frontmatter.** Add `->frontmatter()` to prepend YAML metadata (author, dates,
+  page/slide/sheet counts).
+- **Page ranges.** Parse just the pages you want with `->pages('1-20')`.
+- **Large files.** Documents up to **1 GB** each.
+- **Massive bulk.** Queue **tens of thousands of files at once** — the backend scales out to
+  absorb the burst and writes each result straight back to your bucket.
+- **One consistent format.** Every input type — PDF, Word, Excel, email — comes out as the
+  same clean Markdown.
+- **Private by design.** With your own bucket, your file bytes never pass through us: your
+  bucket in, your bucket out.
+
+> Legacy `.doc` / `.ppt` (the pre-2007 binary formats) are supported alongside the modern
+> `.docx` / `.pptx`. More formats are on the way.
 
 ---
 
