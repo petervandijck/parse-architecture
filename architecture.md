@@ -4,13 +4,17 @@ Systems and flows for **Parse for Artisans** (parseforartisans.com). This is the
 technical companion to `docs.md` (user-facing). See `CLAUDE.md` for the high-level
 overview and open decisions.
 
+> **Parse backend:** `../modal/CLAUDE.md` (the V1 build spec) is the **final word** — build
+> work happens there. The backend sections below follow it; if they drift, update this file
+> to match, not the other way around.
+
 ## Systems
 
 | # | System | What it is | Owns |
 |---|--------|-----------|------|
 | 1 | **Client SDK** | Composer package the customer installs (`composer require ...`) | The `Parse::file()->parse()` / `->status()` / `->markdown()` surface + `ParseCompleted`/`ParseFailed` events. Talks only to the SaaS API over HTTPS with the customer's API key. Owns a `parse_requests` table (correlation + status), a signed webhook route (webhook delivery), and a self-releasing poll job (poll delivery). |
 | 2 | **SaaS app** | The Laravel application we run at parseforartisans.com | Auth, API keys, billing/metering, presigned URLs, file-type detection & routing, calling Modal, receiving Modal's webhook, the status endpoint, customer webhooks. Hosts the managed dev bucket. |
-| 3 | **Parse backend** | Existing Modal serverless workers (`../parse-function`) | The actual parse. One endpoint per file type. Fully async. Never customer-facing. |
+| 3 | **Parse backend** | Modal serverless workers — new backend in `../modal` (greenfield, to build); old `~/Herd/parse-function` is the working contract reference | The actual parse. One endpoint per file type. Fully async. Never customer-facing. |
 | 4 | **Queue** | Laravel queue (Redis/SQS) inside the SaaS app | Dispatching to Modal, handling the Modal webhook, firing the customer webhook. (A separate poll job runs on the *customer's* queue, owned by the SDK — see Delivery.) |
 | 5 | **Object storage** | Default: the **customer's** bucket (BYO). Dev: a SaaS-hosted **managed bucket**. | BYO: the SDK presigns `file_url` (GET) + `upload_url` (PUT) on the customer's own disk; the SaaS never touches bytes. Managed: SaaS-hosted, quota-limited, ~1-day retention — for local dev with no bucket; the customer uploads bytes to us, the result lands with us, and `->markdown()` fetches it via the API. |
 
@@ -45,11 +49,32 @@ architectural point: the same configured disk is reused to presign the source GE
 (see "The parse flow") and is the one knob that selects BYO vs. the managed dev bucket — one
 disk concept end to end.
 
-## File-type routing
+## File-type routing — decided
 
-**File-type detection and Modal endpoint routing live in the SaaS app** (by extension + MIME
-sniff), so the SDK stays dumb and the customer just calls `->parse()` regardless of format.
-*(Final placement to be confirmed — leaning SaaS.)*
+**The SaaS routes by extension.** Allowlist and routing are the same step: known extension →
+the matching `trigger-<type>` Modal endpoint; unknown extension → synchronous reject at
+submit (`ParseException`). The SDK stays dumb and the customer just calls `->parse()`
+regardless of format.
+
+Why extension-only, no MIME/byte sniffing: **nobody upstream of Modal has the bytes.** Under
+BYO the file sits in the customer's bucket — the SDK only presigns URLs and the SaaS only
+ever sees `{id, file_url, upload_url}`. Sniffing would mean ranged GETs against presigned
+URLs (latency + cost at bulk scale, and it dilutes "your bytes never transit us"). For our
+customer base — Laravel apps parsing files their own code stored, typically validated with
+`mimes:` at upload — the extension is present ~always and lying ~never.
+
+The rare mismatch is handled by **verification by construction**: the Modal worker is the
+only component that reads the file, and a parser failing on wrong bytes reports a typed
+`ParseFailed` ("extension says pdf, content is docx") through the normal failure path.
+
+Edge cases: `Parse::url()` requires a known extension in the URL for v1; a `->type('pdf')`
+override covers extension-less URLs. (A HEAD-for-Content-Type fallback can come later if
+people hit this.)
+
+This decision is **internal and reversible** — customers never see the SaaS↔Modal wiring, so
+collapsing to a single Modal endpoint with a dispatcher later would be a zero-impact
+refactor. We pick extension routing because it ships: it keeps the proven per-type endpoint
+contract with no new components on the greenfield backend's critical path.
 
 ## The parse flow (`->parse()`)
 
@@ -67,7 +92,7 @@ reach for their own queue only to fan out bulk submissions.
 2. SDK:       mint id (uuid), presign GET file_url + PUT upload_url on the
               customer's bucket, INSERT parse_requests row (status=pending)
 3. SDK     →  POST /v1/parse {id, file_url, upload_url}  (tiny, API key) ──▶ SaaS  (202)
-4. SaaS:      auth + meter, persist job, detect type
+4. SaaS:      auth + quota check, persist job, route by extension
 5. SaaS queue:POST trigger-<type> {file_url, upload_url,
               webhook_url:<SaaS>, webhook_secret:<SaaS>}     ──▶ Modal  (202)
 6. Modal:     GET file_url (customer bucket) → parse
@@ -84,6 +109,11 @@ Notes:
 - **The SaaS proxies the webhook** (Modal → SaaS → customer) rather than letting Modal call
   the customer directly. This keeps Modal hidden, lets the SaaS record completion for
   billing, and gives the customer one stable, signed callback contract.
+- **Metering is per page** (1 credit = 1 page; $3 per 1,000 credits, 10,000 free/month —
+  locked, see the business repo's `pricing.md`). The `page_count` Modal reports in the step-7
+  webhook is the billable quantity, so metering finalizes at step 8, on completion — step 4
+  only checks auth/quota. Page-equivalents for non-paginated formats (xlsx/email/image) and
+  premium credit costs are still open.
 - **The output is already in the bucket** by the time the event fires — the result carries the
   URL + metadata, not the markdown body. `->markdown()` reads it (from the customer bucket
   directly, or via the API for the managed bucket).
@@ -162,51 +192,65 @@ webhook/poll paths never running together — are safe. `->parse()` returns this
 delivery (local dev) — it polls `GET /v1/parse/{id}` and fires the event. It runs on the
 customer's own queue and is never used when delivery is `webhook`.
 
-## Scaling the parse backend — worker tiers & large documents (TBD)
+## Scaling the parse backend — worker tiers & large documents
 
 The current `parse-function` has one worker per file type with fixed memory/timeout. To
 handle a wide size range — from a 1-page invoice to a multi-hundred-MB scan — without
-over-provisioning every job, two complementary directions, **both TBD**:
+over-provisioning every job:
 
-### Worker tiers (different memory/timeout per size)
+### Worker sizing — v1 decided: one size per type, no tiers
 
-Deploy the same parse logic as **several Modal functions sized differently** — e.g.
-`small` (low memory, short timeout), `medium`, `large` (high memory, long timeout, bigger
-ephemeral disk). Route a job to the right tier by file size / page count, so small jobs stay
-cheap and fast while big jobs get the resources they need. Routing can live in **either**
-place:
-- **SaaS-side routing** — the SaaS inspects size (from the upload, a HEAD on `file_url`, or
-  a cheap page-count probe) and calls the matching `trigger-<type>-<tier>` endpoint.
-- **Modal-side routing** — the SaaS hits one endpoint; a thin dispatcher inside Modal probes
-  the file and `.spawn()`s the appropriately-sized worker.
+**v1 has no worker tiers and no size routing.** Each `trigger-<type>` endpoint is one
+generously-sized function (the PDF worker: ~8–16 GB memory, ~2 h timeout cap, big ephemeral
+disk — exact numbers set by the pre-launch validation test). `trigger-pdf` just *is* the
+worker; no entry function, no HEAD probe, nothing routes on size.
 
-Trade-off to settle: SaaS-side keeps Modal dumb and makes cost/routing visible to billing;
-Modal-side keeps the SaaS contract to a single endpoint per type. Leaning SaaS-side for
-visibility, but undecided.
+Why this isn't reckless: **internal serial page-batching bounds peak memory regardless of
+document size** (see below), so one size covers the advertised range. Tiers only buy cost
+efficiency — paying big-memory-seconds for 1-page invoices — and at Modal's memory pricing
+that waste is ~$0.0005 per invoice against $0.003/page revenue: real at scale, irrelevant
+at zero customers. A wrong size number is fixed by editing one config value and redeploying.
 
-### Chunked parsing (the path to 1 GB)
+**When tiers come back:** when usage shows it — unit economics at real volume, or a job
+class needing a different resource profile. The design is settled and waiting: Modal-internal,
+a thin per-type entry function doing HEAD → `Content-Length` → threshold → `.spawn()` the
+right-sized worker, tier reported in the completion webhook for billing. Tiers are the cheap
+first step; chunking (below) the expensive second.
 
-**Committed target: support up to 1 GB per file** (advertised in the docs). The backend will
-be built to deliver this. For documents too big for even a `large` worker in one pass, split
-and parallelize (this is the existing TODO in `parse-function/CLAUDE.md`):
-1. **Split** into page ranges (e.g. 50 pages each) — `pymupdf4llm.to_markdown(pages=[...])`
-   and `pdf2image`'s `first_page`/`last_page` already support this.
-2. **Fan out** the chunks across many containers in parallel (already scales to
-   `max_containers=100`).
-3. **Stitch** the chunk markdown back together (with `## Page N` markers) and write the
-   single result to the customer's bucket.
+### Large documents — v1 is single-pass; chunking is deferred
 
-This also lifts today's hard caps that block big files: `MAX_PAGES_FOR_OCR = 200`, the
-30-minute OCR `timeout`, single-pass memory, and ephemeral disk for the download. It makes
-huge docs *faster*, not just possible (a 2,000-page PDF → 40 parallel 50-page jobs instead
-of one serial grind).
+**Committed target: PDFs up to 1 GB** (advertised in the docs, explicitly scoped to PDF —
+other formats carry lower caps; a 1 GB xlsx would melt any engine). The v1 path is
+**one single-pass worker, not distributed chunking**:
 
-**Status:** docs advertise **up to 1 GB**; the backend work (chunked parsing + raised
-caps/timeouts/disk) is committed and **to build in `parse-function`**.
+- generous memory/timeout/disk on the per-type worker; drop `MAX_PAGES_FOR_OCR = 200`;
+- bound memory **inside** the worker by processing pages in serial batches —
+  `pymupdf4llm.to_markdown(pages=[...])` and `pdf2image`'s `first_page`/`last_page` already
+  support this. Internal batching: no cross-container coordination, no stitch step, no
+  partial-failure handling.
+
+The cost is wall-clock on the extreme tail: a 2,000-page scanned PDF OCR'd serially takes
+hours. That's acceptable under the always-async contract (no latency promise), and free
+early access is the right time to learn whether anyone actually feels it.
+
+**Validate before launch:** run a genuinely large file — including a big scanned PDF —
+through the PDF worker end to end. The 1 GB number in the docs must be tested, not
+aspirational; the test also sets the worker's memory/timeout/disk numbers.
+
+**Chunked parsing (split → fan out → stitch) is deferred.** It's a *speed* optimization for
+huge documents, not a capability requirement, and its design is a sketch, not final: split
+into page ranges (e.g. 50 pages), fan out across containers (already scales to
+`max_containers=100`), stitch the markdown back together (`## Page N` markers) and write
+one result to the bucket. A 2,000-page PDF becomes 40 parallel 50-page jobs instead of one
+serial grind. Build it when single-pass jobs prove too slow for real customers.
+
+**Status:** docs advertise **up to 1 GB for PDFs** (lower caps elsewhere); v1 delivers it
+with one generously-sized single-pass worker per type (raised caps/timeouts/disk + internal page batching), **to
+build in the new backend (`../modal`)**. Tiers and chunking deferred.
 
 ## Backend quality, gaps & risks (TBD)
 
-The parse backend ([`../parse-function/CLAUDE.md`](../parse-function/CLAUDE.md)) is **not
+The parse backend (`~/Herd/parse-function/CLAUDE.md`) is **not
 final** — it's a per-format Python stack we can adjust. Benchmarking against
 [parsel](https://github.com/shipfastlabs/parsel) (a local PHP library built on
 [liteparse](https://github.com/run-llama/liteparse) — the same engine `parse-function`
@@ -227,14 +271,19 @@ these are decided; we'll pick which gaps to close later.
 
 ### Where we're likely weaker than the parsel/liteparse stack
 
-- **Office fidelity (biggest gap).** parsel uses **LibreOffice**, which does true
-  layout-fidelity conversion and handles legacy `.doc`/`.ppt`. Our `mammoth` / `python-pptx`
-  / `openpyxl` are lightweight but lower-fidelity on complex documents. *Option: a
-  LibreOffice-backed "high-fidelity Office" worker tier (fits the worker-tiers plan above).*
-- **Legacy `.doc`/`.ppt` + `.csv` (committed in the docs, not built yet).** The user docs now
-  advertise `.doc`, `.ppt`, and `.csv`. These need new backend paths: `.doc`/`.ppt` likely via
-  a **LibreOffice** worker (our pure-Python libs are `.docx`/`.pptx`-only); `.csv` is a trivial
-  add to the spreadsheet path. **To build in `parse-function`.**
+- **Office fidelity.** parsel uses **LibreOffice**, which does true layout-fidelity
+  conversion. Our `mammoth` / `python-pptx` / `openpyxl` are lightweight but lower-fidelity
+  on complex documents. With LibreOffice now in the v1 stack for legacy formats (below), a
+  "high-fidelity Office" tier for *complex modern* docs costs much less to add later — the
+  image and worker already exist. *Still a roadmap option, not v1.*
+- **Legacy `.doc`/`.ppt`/`.xls` + `.csv` — decided, to build in `../modal` v1.** The user
+  docs advertise them. Legacy binary formats go through a **LibreOffice-equipped worker used
+  as a conversion shim**: convert legacy → modern (`soffice` headless, `.doc`→`.docx`,
+  `.ppt`→`.pptx`, `.xls`→`.xlsx`), then run the *same* parsers as the modern path — so
+  legacy and modern files yield identical markdown. Separate worker image (LibreOffice is
+  heavy; one job per container, so its concurrency-unsafety doesn't bite); modern paths
+  stay light. SaaS extension routing sends legacy extensions to this worker's endpoint —
+  fits the per-type routing unchanged. `.csv` is a trivial add to the spreadsheet path.
 - **Standalone image OCR (clear hole).** parsel OCRs images (ImageMagick → PDF → Tesseract).
   Our image worker only **optimizes** (resize to JPEG) — it produces no text/markdown.
   *Option: add an image→markdown OCR path; cheap, obvious.*
@@ -293,17 +342,25 @@ cost is the output plumbing and a new API/SDK contract.
 
 ## What lives where (repos)
 
-- `parse-architecture` (this repo) — architecture + user docs only. No app code.
-- `parse-function` (`../parse-function`) — Modal workers. Already exists.
-- SaaS app — separate repo, **not created yet**.
-- Client SDK — separate Composer package, **not created yet**.
+All repos live under one parent, `~/Herd/parseforartisans/`:
+
+- `architecture` (this repo) — architecture + user docs only. No app code.
+- `app` — the SaaS Laravel app (Laravel 13, Livewire 4, Flux, Pest). Early scaffold.
+- `modal` — the **new** Modal parse backend. Greenfield, to be written from scratch.
+- `evaluation` — eval harness vs LlamaParse (103-file corpus).
+- `sdk` — the client Composer package. **Not created yet.**
+
+The **old** backend, `~/Herd/parse-function` (outside the parent), is the working contract
+reference — shared with another project, reference only, don't modify.
 
 ## Still open (see CLAUDE.md)
 
-- Pricing/metering unit (page / file / MB).
-- Final home of file-type detection (leaning SaaS).
-- Worker tiers + where size-based routing lives (SaaS-side vs. Modal-side); chunked parsing
-  for the **1 GB** target — see "Scaling the parse backend" above. Docs advertise up to 1 GB.
+- Page-equivalents for non-paginated formats (xlsx / email / image) and premium credit
+  costs — the per-page unit itself is locked (1 credit = 1 page, $3/1k, 10k free/month).
+- Worker resource numbers (memory/timeout/disk per type — set by the pre-launch validation
+  test), and the deferred tier and chunking designs; v1 shape is decided (one size per
+  type, single-pass, no size routing); see "Scaling the parse backend" above. The **1 GB**
+  docs claim must be validated end to end before launch.
 - Which backend gaps to close (Office fidelity via LibreOffice, image OCR, structured/coord
   output) and the **PyMuPDF AGPL licensing** question — see "Backend quality, gaps & risks".
   `parse-function` is not final and can be adjusted.

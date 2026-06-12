@@ -383,7 +383,7 @@ nothing to configure per format.
 | **PDF** | `.pdf` | Clean Markdown. **Scanned PDFs are OCR'd automatically** — no flag needed. |
 | **Word** | `.docx`, `.doc` | Markdown with headings, lists, and tables preserved. |
 | **PowerPoint** | `.pptx`, `.ppt` | One `## Slide N` section per slide, including slide tables. |
-| **Spreadsheet** | `.xlsx`, `.csv` | Each sheet (or the CSV) rendered as a Markdown table, one `## Sheet` per tab. |
+| **Spreadsheet** | `.xlsx`, `.xls`, `.csv` | Each sheet (or the CSV) rendered as a Markdown table, one `## Sheet` per tab. |
 | **Email** | `.eml`, `.msg` | Headers (from/to/subject/date) as YAML frontmatter, body text, and an attachment list. |
 
 Highlights:
@@ -398,11 +398,12 @@ Highlights:
 - **Hyperlinks preserved.** Links in the source stay as Markdown links in the output.
 - **Email fields & attachments.** Email comes back with from/to/subject/date as frontmatter,
   the body, and a list of attachments (name + size).
-- **Type auto-detection.** You never pass a format; we sniff it from the file.
+- **Type auto-detection.** You never pass a format; we detect it and route automatically.
 - **Optional frontmatter.** Add `->frontmatter()` to prepend YAML metadata (author, dates,
   page/slide/sheet counts).
 - **Page ranges.** Parse just the pages you want with `->pages('1-20')`.
-- **Large files.** Documents up to **1 GB** each.
+- **Large files.** PDFs up to **1 GB** each; other formats top out lower (see
+  [Limits](#limits--errors)).
 - **Massive bulk.** Queue **tens of thousands of files at once** — the backend scales out to
   absorb the burst and writes each result straight back to your bucket.
 - **One consistent format.** Every input type — PDF, Word, Excel, email — comes out as the
@@ -410,8 +411,8 @@ Highlights:
 - **Private by design.** With your own bucket, your file bytes never pass through us: your
   bucket in, your bucket out.
 
-> Legacy `.doc` / `.ppt` (the pre-2007 binary formats) are supported alongside the modern
-> `.docx` / `.pptx`. More formats are on the way.
+> Legacy `.doc` / `.ppt` / `.xls` (the pre-2007 binary formats) are supported alongside the
+> modern `.docx` / `.pptx` / `.xlsx`. More formats are on the way.
 
 ---
 
@@ -419,7 +420,7 @@ Highlights:
 
 | Aspect | Your bucket (BYO) | Managed dev bucket |
 |:--|:--|:--|
-| **Max file size** | up to 1 GB | smaller, dev-sized cap |
+| **Max file size** | PDFs up to 1 GB; other formats lower | smaller, dev-sized cap |
 | **Total storage** | your own | quota-limited |
 | **Result retention** | yours to keep | ~1 day |
 | **Best for** | production, bulk | local development |

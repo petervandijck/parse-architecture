@@ -25,10 +25,14 @@ settle the architecture and write the developer-facing documentation before buil
 2. **SaaS app** (`parseforartisans.com`) — the Laravel application we sell. Handles signup,
    billing, API keys, file storage, presigned URLs, calling Modal, receiving Modal's
    webhook, and serving results back to the SDK. **Not in this repo.**
-3. **parse-function** (`../parse-function`) — existing Modal serverless backend. One
-   endpoint per file type; fully async (returns `202`, PUTs markdown to a presigned URL,
-   POSTs a webhook on completion). See its `CLAUDE.md` / `openapi.yaml`. **Do not** expose
-   Modal directly to customers — the SaaS app is always the gateway.
+3. **Parse backend** — Modal serverless workers. The **new backend is `../modal`**, and
+   **`../modal/CLAUDE.md` (the V1 build spec) is the final word on the backend** — build
+   work happens there; if this repo and that file drift, that file wins and this repo gets
+   updated to follow. The **old `~/Herd/parse-function`** is the working reference for the
+   contract — one endpoint per file type; fully async (returns `202`, PUTs markdown to a
+   presigned URL, POSTs a webhook on completion). See its `CLAUDE.md` / `openapi.yaml`;
+   it's shared with another project, so reference only. **Do not** expose Modal directly
+   to customers — the SaaS app is always the gateway.
 
 ## Design goals
 
@@ -51,10 +55,18 @@ queue to submit).
 
 ## Open decisions
 
-- **Pricing unit.** Per page? Per file? Per MB? (Affects what the SaaS meters.)
+- **Page-equivalents for non-paginated formats.** 1 credit = 1 page is locked (see Decided),
+  but what counts as a "page" for an xlsx sheet, an email, or an image is deferred to
+  Phase 1+ — as is premium credit cost (OCR / large / high-accuracy above 1:1). Business
+  detail lives in the business repo's `pricing.md`; the architectural consequence is that
+  the SaaS metering code needs a per-format page-equivalence rule.
 
 ### Decided
 
+- **Pricing/metering unit: per page.** 1 credit = 1 page, $3 per 1,000 credits, 10,000 free
+  credits/month, one tier (locked June 2026 — see the business repo's `pricing.md`). The
+  SaaS meters the `page_count` Modal reports in its completion webhook — billing finalizes
+  on completion, not at submit.
 - **One mode: always async**, event-delivered. No sync/blocking string call. `->parse()`
   returns a handle; a `ParseCompleted`/`ParseFailed` event carries the result. `->status()`
   reports progress for a UI — it **reads the local `parse_requests` row** (kept current by the
@@ -67,8 +79,27 @@ queue to submit).
   event; they never run together. Poll rides the customer's queue (`composer run dev`); a
   capped TTL guarantees the event eventually arrives. The same poll job advances `->status()`
   locally, so a worker must be running locally for status to move or events to fire.
-- **File-type detection/routing lives in the SaaS** (by extension + MIME), so the SDK stays
-  dumb and the dev just calls `->parse()` regardless of format. *(Leaning final.)*
+- **Legacy Office via LibreOffice — in the new backend.** `../modal` ships a
+  LibreOffice-equipped worker for the legacy binary formats (`.doc`, `.ppt`, `.xls`),
+  used as a **conversion shim**: convert legacy → modern (`.doc`→`.docx` etc.), then run
+  the same parsers as the modern path, so legacy and modern files produce identical
+  markdown. It's a separate worker image (LibreOffice is heavy) — modern paths stay light;
+  SaaS extension routing sends legacy extensions to it unchanged. A LibreOffice
+  "high-fidelity Office" tier for *complex modern* docs stays a roadmap option, not v1.
+- **Large files, v1: one generously-sized worker per type — no tiers, no chunking.**
+  Internal serial page-batching bounds peak memory regardless of document size, so a single
+  worker (PDF: ~8–16 GB, ~2 h timeout, big disk) covers the 1 GB docs claim single-pass —
+  slow on the extreme tail, fine under the async contract — and **must be tested end to end
+  before launch** (the test also sets the resource numbers). Tiers (HEAD → size threshold →
+  spawn, Modal-internal) and chunked parsing (split/fan-out/stitch) are both deferred cost/
+  speed optimizations — build when usage shows the need; tiers first, chunking second.
+- **File-type routing lives in the SaaS, by extension only.** Known extension →
+  `trigger-<type>`; unknown → sync reject at submit. No byte sniffing anywhere — neither the
+  SDK nor the SaaS ever has the bytes (BYO bucket), so routing runs on the filename. Modal
+  verifies by construction: a parser failing on mismatched bytes returns a typed
+  `ParseFailed` ("content doesn't match extension"). `Parse::url()` requires a known
+  extension in the URL for v1 (a `->type('pdf')` override covers the rest). The SaaS↔Modal
+  wiring is invisible to customers, so this stays cheap to revisit later.
 
 ## Backend reference (parse-function)
 
