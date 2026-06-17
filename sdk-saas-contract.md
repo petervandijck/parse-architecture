@@ -56,24 +56,24 @@ Selected by `parse.disk` (or a per-call `->disk('s3')`).
 | Who presigns `file_url` / `upload_url` | the SDK, against the customer disk | the SaaS, against its managed bucket |
 | Source bytes | already in the customer bucket | the SDK reads the **default disk** (`config('filesystems.default')`) and uploads them to the SaaS at submit (decision **M1**) |
 | Submit content type | `application/json` | `multipart/form-data` (metadata + file) |
-| `->markdown()` reads | the customer disk directly (`Storage::disk($disk)->get($output_path)`) | the SaaS API (`GET /v1/parse/{id}/markdown`) |
+| `->markdown()` reads | the customer disk directly (`Storage::disk($disk)->get($output_path)`) | the SaaS API (`GET /api/v1/parse/{id}/markdown`) |
 | `->to(path)` | sets the output object key | not meaningful; the result is addressed by `id` (recorded on the row, does not change retrieval) |
 
 ## Endpoints
 
 | Method | Path | Purpose |
 |:--|:--|:--|
-| POST | `/v1/parse` | submit one file (BYO = JSON, managed = multipart) |
-| POST | `/v1/parse/batch` | submit many files in one call |
-| GET | `/v1/parse/{id}` | status (drives `->status()` and the poll job) |
-| GET | `/v1/parse/{id}/markdown` | fetch the result (managed mode only) |
-| GET | `/v1/ping` | `parse:ping` health/key check |
+| POST | `/api/v1/parse` | submit one file (BYO = JSON, managed = multipart) |
+| POST | `/api/v1/parse/batch` | submit many files in one call |
+| GET | `/api/v1/parse/{id}` | status (drives `->status()` and the poll job) |
+| GET | `/api/v1/parse/{id}/markdown` | fetch the result (managed mode only) |
+| GET | `/api/v1/ping` | `parse:ping` health/key check |
 
-All paths are versioned under `/v1`. Base URL `https://parseforartisans.com`.
+All paths are versioned under `/api/v1`. Base URL `https://parseforartisans.com`.
 
 ---
 
-### POST `/v1/parse` (submit)
+### POST `/api/v1/parse` (submit)
 
 **BYO mode (JSON):**
 
@@ -113,7 +113,7 @@ Field notes:
 - The SaaS validates option/extension compatibility at submit and rejects an incompatible combo
   synchronously (`unsupported_option`), for example `pages` on a docx. The SDK does not pre-check.
 - `delivery.mode` is `webhook` or `poll`. For `poll` (local dev), `callback_url` is omitted and
-  the SaaS makes no outbound call; the SDK polls `GET /v1/parse/{id}`. For `webhook`, the SaaS
+  the SaaS makes no outbound call; the SDK polls `GET /api/v1/parse/{id}`. For `webhook`, the SaaS
   POSTs the result to `callback_url` on completion. Sending `callback_url` per request keeps the
   zero-config promise (no dashboard webhook step). The SaaS SSRF-hardens it: require an `https`
   URL, reject when the host resolves to a private, loopback, link-local, or cloud-metadata
@@ -127,7 +127,7 @@ Field notes:
 { "id": "9f1c0b6e-...-uuid", "status": "pending" }
 ```
 
-### POST `/v1/parse/batch`
+### POST `/api/v1/parse/batch`
 
 `{ "items": [ <submit object>, ... ] }` (JSON for BYO; multipart with multiple `file` parts and
 a `payload` manifest for managed). Returns `{ "items": [ { "id", "status" }, ... ] }`. The SaaS
@@ -154,7 +154,7 @@ Any non-2xx from submit is thrown by `->parse()` as `ParseForArtisans\Exceptions
 Note: quota at submit is a coarse gate (page count is unknown until completion), so the true
 usage is finalized later. Quota can be slightly overshot by in-flight jobs; acceptable for v1.
 
-### GET `/v1/parse/{id}` (status)
+### GET `/api/v1/parse/{id}` (status)
 
 Account-scoped. Drives `->status()` (the local DB row is kept current from this) and the poll job.
 
@@ -177,14 +177,14 @@ stay null. 404 if the `id` is unknown for this account. There is no `markdown_ur
 resolves the result itself (BYO from the disk by `output_path`; managed via the markdown endpoint
 by `id`).
 
-### GET `/v1/parse/{id}/markdown` (managed read)
+### GET `/api/v1/parse/{id}/markdown` (managed read)
 
 Returns the stored markdown (`Content-Type: text/markdown`) for managed-mode requests. Used by
 `->markdown()` when no disk is configured. Account-scoped; 404 after retention (~1 day) or for a
 BYO request (BYO results never land in the managed bucket). For BYO, `->markdown()` never calls
 this; it reads the customer disk.
 
-### GET `/v1/ping`
+### GET `/api/v1/ping`
 
 ```json
 { "ok": true, "plan": "starter" }
@@ -279,7 +279,7 @@ non-paginated formats is open as **G5 / O1**. Metering finalizes on completion, 
 ## Result resolution: `->markdown()`
 
 - **BYO:** `Storage::disk($parse->disk)->get($parse->output_path)`. No API call.
-- **Managed:** `GET /v1/parse/{id}/markdown` with the API key.
+- **Managed:** `GET /api/v1/parse/{id}/markdown` with the API key.
 
 The SDK picks the path from the row (`disk` null => managed). The output is already in place by
 the time the event fires; the event carries metadata, never the markdown body.
@@ -296,7 +296,7 @@ the time the event fires; the event carries metadata, never the markdown body.
 
 ## Decisions (resolved June 2026)
 
-1. Base URL `https://parseforartisans.com`, all paths under `/v1`.
+1. Base URL `https://parseforartisans.com`, all paths under `/api/v1`.
 2. Delivery and `callback_url` travel per request in the submit payload (no dashboard webhook
    step). SSRF rule: https only, reject private/loopback/link-local/metadata hosts, no redirects.
 3. No `markdown_url` in status or webhook payloads; the SDK resolves markdown by mode.
