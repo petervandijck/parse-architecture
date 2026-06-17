@@ -1,7 +1,8 @@
 # Architecture
 
 Systems and flows for **Parse for Artisans** (parseforartisans.com). This is the
-technical companion to `docs/` (user-facing). See `CLAUDE.md` for the high-level
+technical companion to the user-facing docs in `../app/resources/views/marketing/docs/markdown/`
+(served at `parseforartisans.com/docs`). See `CLAUDE.md` for the high-level
 overview and open decisions.
 
 > **Parse backend:** `../modal/CLAUDE.md` (the V1 build spec) is the **final word** — build
@@ -44,7 +45,7 @@ customer app ──────▶ Client SDK ──────────▶ 
 
 ## Client SDK input API
 
-The SDK speaks Laravel's **filesystem disk** language (`docs/parsing-documents.md` covers the call forms). The
+The SDK speaks Laravel's **filesystem disk** language (`../app/resources/views/marketing/docs/markdown/parsing-documents.md` covers the call forms). The
 architectural point: the same configured disk is reused to presign the source GET + output PUT
 (see "The parse flow") and is the one knob that selects BYO vs. the managed dev bucket — one
 disk concept end to end.
@@ -134,7 +135,7 @@ Notes:
 | **`->markdown()` reads** | the customer disk directly | the SaaS API |
 
 Selected by the configured disk — `parse.disk` set → BYO, unset → managed (the zero-config
-fallback, so a fresh install parses with no bucket setup). Limits/retention live in `docs/handling-results.md`.
+fallback, so a fresh install parses with no bucket setup). Limits/retention live in `../app/resources/views/marketing/docs/markdown/handling-results.md`.
 
 ### Delivery — webhook (default) vs. poll (local)
 
@@ -168,10 +169,10 @@ deduped without the developer handling ids or secrets:
 | `id` (uuid) | SDK-generated correlation handle; sent to the SaaS, echoed in the webhook |
 | `disk`, `source_path`, `output_path` | where the file is and where the markdown lands |
 | `status` | `pending` → `completed` / `failed` |
-| `page_count`, `error` | filled on completion |
+| `page_count`, `credits_used`, `error` | filled on completion (`credits_used` = billed credits) |
 | `parsable_type`, `parsable_id` (nullable) | polymorphic association set by `->for($model)`; lets the event hand the customer's own model back as `$request->parsable`. Null when no `->for()` was used |
 | `meta` (json) | customer-supplied context (e.g. `invoice_id`), returned in the event |
-| `created_at`, `completed_at` | timing / pruning |
+| `created_at`, `started_at`, `completed_at`, `duration_ms` | timing / pruning (`started_at`→`completed_at` is the parse wall-clock, also reported as `duration_ms`) |
 
 No secret column — webhook verification uses the single `PARSE_WEBHOOK_SECRET`. Delivery is
 idempotent (looks up by `id`, ignores already-terminal rows) so duplicate deliveries — and the
@@ -358,7 +359,8 @@ All repos live under one parent, `~/Herd/parseforartisans/`:
 
 - `architecture` (this repo) — architecture + user docs only. No app code.
 - `app` — the SaaS Laravel app (Laravel 13, Livewire 4, Flux, Pest). Early scaffold.
-- `modal` — the **new** Modal parse backend. Greenfield, to be written from scratch.
+- `modal` — the Modal parse backend. Built, deployed and smoke-tested (June 2026);
+  `../modal/CLAUDE.md` is the final word on it.
 - `evaluation` — eval harness vs LlamaParse (103-file corpus).
 - `sdk` — the client Composer package. **Not created yet.**
 

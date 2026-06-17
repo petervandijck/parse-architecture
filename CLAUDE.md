@@ -51,7 +51,7 @@ settle the architecture and write the developer-facing documentation before buil
 
 ## Client API surface
 
-The full developer-facing API is in **`docs/`** (start at `docs/README.md`); don't duplicate it here. In one line:
+The full developer-facing API now lives in the SaaS app at **`../app/resources/views/marketing/docs/markdown/`** (served at `parseforartisans.com/docs`; start at `index.md`); don't duplicate it here. In one line:
 `Parse::file($path)->parse()` (also `Parse::disk(...)->file(...)`, `Parse::files([...])`,
 `Parse::url(...)`) returns a `ParseRequest` handle; a `ParseCompleted`/`ParseFailed` event
 delivers the result; `->status()` shows progress. `->for($model)` ties the request to a
@@ -125,4 +125,4 @@ before `->parse()`, a fast inline call (no queue to submit).
 
 - `CLAUDE.md` — this file; architecture overview and decisions.
 - `architecture.md` — systems, boundaries/auth, and the parse flow (storage + delivery) in detail.
-- `docs/` — user-facing developer documentation (Laravel-style), split into pages; nav index in `docs/README.md`.
+- User-facing developer documentation lives in the SaaS app at `../app/resources/views/marketing/docs/markdown/` (served at `parseforartisans.com/docs`, nav index `index.md`), not in this repo.
