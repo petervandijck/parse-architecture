@@ -1,7 +1,7 @@
 # Architecture
 
 Systems and flows for **Parse for Artisans** (parseforartisans.com). This is the
-technical companion to `docs.md` (user-facing). See `CLAUDE.md` for the high-level
+technical companion to `docs/` (user-facing). See `CLAUDE.md` for the high-level
 overview and open decisions.
 
 > **Parse backend:** `../modal/CLAUDE.md` (the V1 build spec) is the **final word** — build
@@ -14,7 +14,7 @@ overview and open decisions.
 |---|--------|-----------|------|
 | 1 | **Client SDK** | Composer package the customer installs (`composer require ...`) | The `Parse::file()->parse()` / `->status()` / `->markdown()` surface + `ParseCompleted`/`ParseFailed` events. Talks only to the SaaS API over HTTPS with the customer's API key. Owns a `parse_requests` table (correlation + status), a signed webhook route (webhook delivery), and a self-releasing poll job (poll delivery). |
 | 2 | **SaaS app** | The Laravel application we run at parseforartisans.com | Auth, API keys, billing/metering, presigned URLs, file-type detection & routing, calling Modal, receiving Modal's webhook, the status endpoint, customer webhooks. Hosts the managed dev bucket. |
-| 3 | **Parse backend** | Modal serverless workers — new backend in `../modal` (greenfield, to build); old `~/Herd/parse-function` is the working contract reference | The actual parse. One endpoint per file type. Fully async. Never customer-facing. |
+| 3 | **Parse backend** | Modal serverless workers — new backend in `../modal`, **built, deployed & smoke-tested (June 12, 2026)**: all six V1 routes live as app `parseforartisans-backend`, one small file per supported format verified end to end. Old `~/Herd/parse-function` is now historical reference only | The actual parse. One endpoint per file type. Fully async. Never customer-facing. |
 | 4 | **Queue** | Laravel queue (Redis/SQS) inside the SaaS app | Dispatching to Modal, handling the Modal webhook, firing the customer webhook. (A separate poll job runs on the *customer's* queue, owned by the SDK — see Delivery.) |
 | 5 | **Object storage** | Default: the **customer's** bucket (BYO). Dev: a SaaS-hosted **managed bucket**. | BYO: the SDK presigns `file_url` (GET) + `upload_url` (PUT) on the customer's own disk; the SaaS never touches bytes. Managed: SaaS-hosted, quota-limited, ~1-day retention — for local dev with no bucket; the customer uploads bytes to us, the result lands with us, and `->markdown()` fetches it via the API. |
 
@@ -44,7 +44,7 @@ customer app ──────▶ Client SDK ──────────▶ 
 
 ## Client SDK input API
 
-The SDK speaks Laravel's **filesystem disk** language (`docs.md` covers the call forms). The
+The SDK speaks Laravel's **filesystem disk** language (`docs/parsing-documents.md` covers the call forms). The
 architectural point: the same configured disk is reused to presign the source GET + output PUT
 (see "The parse flow") and is the one knob that selects BYO vs. the managed dev bucket — one
 disk concept end to end.
@@ -134,7 +134,7 @@ Notes:
 | **`->markdown()` reads** | the customer disk directly | the SaaS API |
 
 Selected by the configured disk — `parse.disk` set → BYO, unset → managed (the zero-config
-fallback, so a fresh install parses with no bucket setup). Limits/retention live in `docs.md`.
+fallback, so a fresh install parses with no bucket setup). Limits/retention live in `docs/handling-results.md`.
 
 ### Delivery — webhook (default) vs. poll (local)
 
@@ -169,6 +169,7 @@ deduped without the developer handling ids or secrets:
 | `disk`, `source_path`, `output_path` | where the file is and where the markdown lands |
 | `status` | `pending` → `completed` / `failed` |
 | `page_count`, `error` | filled on completion |
+| `parsable_type`, `parsable_id` (nullable) | polymorphic association set by `->for($model)`; lets the event hand the customer's own model back as `$request->parsable`. Null when no `->for()` was used |
 | `meta` (json) | customer-supplied context (e.g. `invoice_id`), returned in the event |
 | `created_at`, `completed_at` | timing / pruning |
 
@@ -176,6 +177,13 @@ No secret column — webhook verification uses the single `PARSE_WEBHOOK_SECRET`
 idempotent (looks up by `id`, ignores already-terminal rows) so duplicate deliveries — and the
 webhook/poll paths never running together — are safe. `->parse()` returns this model; the
 `ParseCompleted` event carries it; `->status()` reads its `status` column.
+
+**Correlation is entirely SDK-local.** `->for($model)` just fills `parsable_type`/`parsable_id`
+on this row before insert (a standard Eloquent morph); the SaaS and Modal never see it; they
+only echo back the `id`. The event resolves `$request->parsable` via the morph. So the primary
+way a customer ties a result to their own record costs nothing in the wire contract and can be
+revisited freely. `->withMeta()` (the `meta` json column) remains the escape hatch for context
+that isn't a model.
 
 ## Queues
 
@@ -245,29 +253,32 @@ one result to the bucket. A 2,000-page PDF becomes 40 parallel 50-page jobs inst
 serial grind. Build it when single-pass jobs prove too slow for real customers.
 
 **Status:** docs advertise **up to 1 GB for PDFs** (lower caps elsewhere); v1 delivers it
-with one generously-sized single-pass worker per type (raised caps/timeouts/disk + internal page batching), **to
-build in the new backend (`../modal`)**. Tiers and chunking deferred.
+with one generously-sized single-pass worker per type (raised caps/timeouts/disk + internal
+page batching), **built and deployed in the new backend (`../modal`)**. Worker sizing is
+provisional until the pre-launch **1 GB validation run** (the one remaining backend task).
+Tiers and chunking deferred.
 
 ## Backend quality, gaps & risks (TBD)
 
-The parse backend (`~/Herd/parse-function/CLAUDE.md`) is **not
-final** — it's a per-format Python stack we can adjust. Benchmarking against
+The engine choices are **not final** — the backend is a per-format Python stack we can
+adjust (now implemented in `../modal`). Benchmarking against
 [parsel](https://github.com/shipfastlabs/parsel) (a local PHP library built on
 [liteparse](https://github.com/run-llama/liteparse) — the same engine `parse-function`
 already evaluated and rejected) surfaced where our underlying packages are weaker. None of
 these are decided; we'll pick which gaps to close later.
 
-### Our current engines
+### Our current engines (as built in `../modal`, June 2026)
 
 | Type | Engine | Output |
 |:--|:--|:--|
 | PDF | `pymupdf4llm` (MuPDF) | Markdown — headings, tables, multi-column reading order, links |
-| Scanned PDF | Tesseract (via `pdf2image`) | Markdown (OCR), capped at 200 pages |
+| Scanned PDF | Tesseract (via `pdf2image`) | Markdown (OCR), serial page batching, no page cap |
 | `.docx` | `mammoth` | Markdown |
-| `.pptx` | `python-pptx` | Markdown (text + tables) |
-| `.xlsx` | `openpyxl` | Markdown tables |
+| `.pptx` | `python-pptx` | Markdown (text + tables + speaker notes) |
+| `.xlsx`/`.csv` | `openpyxl` / stdlib `csv` | Markdown tables |
+| `.doc`/`.ppt`/`.xls` | LibreOffice headless → the modern parsers | Identical to the modern formats |
 | `.eml`/`.msg` | stdlib `email` / `extract-msg` | Markdown + frontmatter |
-| images | `pyvips` (optimize only) | **No markdown** |
+| images | *(no image route in v1)* | — |
 
 ### Where we're likely weaker than the parsel/liteparse stack
 
@@ -276,14 +287,15 @@ these are decided; we'll pick which gaps to close later.
   on complex documents. With LibreOffice now in the v1 stack for legacy formats (below), a
   "high-fidelity Office" tier for *complex modern* docs costs much less to add later — the
   image and worker already exist. *Still a roadmap option, not v1.*
-- **Legacy `.doc`/`.ppt`/`.xls` + `.csv` — decided, to build in `../modal` v1.** The user
+- **Legacy `.doc`/`.ppt`/`.xls` + `.csv` — built in `../modal` v1, verified live.** The user
   docs advertise them. Legacy binary formats go through a **LibreOffice-equipped worker used
   as a conversion shim**: convert legacy → modern (`soffice` headless, `.doc`→`.docx`,
   `.ppt`→`.pptx`, `.xls`→`.xlsx`), then run the *same* parsers as the modern path — so
   legacy and modern files yield identical markdown. Separate worker image (LibreOffice is
   heavy; one job per container, so its concurrency-unsafety doesn't bite); modern paths
   stay light. SaaS extension routing sends legacy extensions to this worker's endpoint —
-  fits the per-type routing unchanged. `.csv` is a trivial add to the spreadsheet path.
+  fits the per-type routing unchanged. `.csv` rides the spreadsheet path. Smoke-tested
+  end to end with real `.doc`/`.ppt`/`.xls` samples through the deployed worker.
 - **Standalone image OCR (clear hole).** parsel OCRs images (ImageMagick → PDF → Tesseract).
   Our image worker only **optimizes** (resize to JPEG) — it produces no text/markdown.
   *Option: add an image→markdown OCR path; cheap, obvious.*
@@ -363,4 +375,4 @@ reference — shared with another project, reference only, don't modify.
   docs claim must be validated end to end before launch.
 - Which backend gaps to close (Office fidelity via LibreOffice, image OCR, structured/coord
   output) and the **PyMuPDF AGPL licensing** question — see "Backend quality, gaps & risks".
-  `parse-function` is not final and can be adjusted.
+  The engine choices in `../modal` are not final and can be adjusted.

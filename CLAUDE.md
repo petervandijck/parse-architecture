@@ -25,14 +25,19 @@ settle the architecture and write the developer-facing documentation before buil
 2. **SaaS app** (`parseforartisans.com`) — the Laravel application we sell. Handles signup,
    billing, API keys, file storage, presigned URLs, calling Modal, receiving Modal's
    webhook, and serving results back to the SDK. **Not in this repo.**
-3. **Parse backend** — Modal serverless workers. The **new backend is `../modal`**, and
-   **`../modal/CLAUDE.md` (the V1 build spec) is the final word on the backend** — build
-   work happens there; if this repo and that file drift, that file wins and this repo gets
-   updated to follow. The **old `~/Herd/parse-function`** is the working reference for the
-   contract — one endpoint per file type; fully async (returns `202`, PUTs markdown to a
-   presigned URL, POSTs a webhook on completion). See its `CLAUDE.md` / `openapi.yaml`;
-   it's shared with another project, so reference only. **Do not** expose Modal directly
-   to customers — the SaaS app is always the gateway.
+3. **Parse backend** — Modal serverless workers. The **new backend is `../modal`** and its
+   initial version is **finished: built, deployed, and smoke-tested (June 12, 2026)** — all
+   six V1 routes (pdf, docx, pptx, spreadsheet, email, legacy-office) are live as Modal app
+   `parseforartisans-backend` (`petervandijck` workspace), with one small file per supported
+   format (pdf/docx/pptx/xlsx/csv/doc/ppt/xls/eml/msg) verified end to end against the
+   deployed endpoints. Detailed quality evals come later (`../evaluation`); the pre-launch
+   **1 GB validation run** that finalizes worker sizing is still pending.
+   **`../modal/CLAUDE.md` is the final word on the backend** — if this repo and that file
+   drift, that file wins and this repo gets updated to follow. One endpoint per file type;
+   fully async (returns `202`, PUTs markdown to a presigned URL, POSTs a webhook on
+   completion). The **old `~/Herd/parse-function`** is historical reference only (shared
+   with another project — don't modify). **Do not** expose Modal directly to customers —
+   the SaaS app is always the gateway.
 
 ## Design goals
 
@@ -46,12 +51,14 @@ settle the architecture and write the developer-facing documentation before buil
 
 ## Client API surface
 
-The full developer-facing API is in **`docs.md`** — don't duplicate it here. In one line:
+The full developer-facing API is in **`docs/`** (start at `docs/README.md`); don't duplicate it here. In one line:
 `Parse::file($path)->parse()` (also `Parse::disk(...)->file(...)`, `Parse::files([...])`,
 `Parse::url(...)`) returns a `ParseRequest` handle; a `ParseCompleted`/`ParseFailed` event
-delivers the result; `->status()` shows progress. Options (`->ocr()`, `->pages()`,
-`->frontmatter()`, `->to()`, `->withMeta()`) chain before `->parse()`, a fast inline call (no
-queue to submit).
+delivers the result; `->status()` shows progress. `->for($model)` ties the request to a
+customer model (polymorphic, SDK-local) so the event hands that model back as
+`$request->parsable`, the primary correlation path; `->withMeta()` carries non-model context.
+Options (`->ocr()`, `->pages()`, `->frontmatter()`, `->to()`, `->withMeta()`, `->for()`) chain
+before `->parse()`, a fast inline call (no queue to submit).
 
 ## Open decisions
 
@@ -79,8 +86,8 @@ queue to submit).
   event; they never run together. Poll rides the customer's queue (`composer run dev`); a
   capped TTL guarantees the event eventually arrives. The same poll job advances `->status()`
   locally, so a worker must be running locally for status to move or events to fire.
-- **Legacy Office via LibreOffice — in the new backend.** `../modal` ships a
-  LibreOffice-equipped worker for the legacy binary formats (`.doc`, `.ppt`, `.xls`),
+- **Legacy Office via LibreOffice — built & verified in the new backend.** `../modal` ships
+  a LibreOffice-equipped worker for the legacy binary formats (`.doc`, `.ppt`, `.xls`),
   used as a **conversion shim**: convert legacy → modern (`.doc`→`.docx` etc.), then run
   the same parsers as the modern path, so legacy and modern files produce identical
   markdown. It's a separate worker image (LibreOffice is heavy) — modern paths stay light;
@@ -101,17 +108,21 @@ queue to submit).
   extension in the URL for v1 (a `->type('pdf')` override covers the rest). The SaaS↔Modal
   wiring is invisible to customers, so this stays cheap to revisit later.
 
-## Backend reference (parse-function)
+## Backend reference (`../modal`, live)
 
-- Async flow: POST `{file_url, webhook_url, upload_url, webhook_secret}` → `202` → worker
-  PUTs markdown to `upload_url`, POSTs result to `webhook_url`.
+- Async flow: POST `{file_url, upload_url, webhook_url, webhook_secret, options}` → `202` →
+  worker PUTs markdown to `upload_url`, POSTs result to `webhook_url` (always — failures
+  arrive as typed errors: `content_mismatch`/`corrupt`/`too_large`/`timeout`/`parse_error`).
 - Auth to Modal: `Authorization: Bearer <PARSE_API_SECRET>` (server-to-server only).
-- Supported today: PDF (auto-OCR), docx, pptx, xlsx, eml, msg, plus media/image
-  optimization. PDFs can also return a truncated copy for LLM ingestion.
+- Live routes: `trigger-{pdf,docx,pptx,spreadsheet,email,legacy-office}` covering PDF
+  (auto-OCR), docx, pptx, xlsx/csv, eml/msg, and doc/ppt/xls. No media/image routes in v1
+  (the old backend's media paths belong to the other product).
 - Built for bursts: `max_containers=100` per worker.
+- Full contract details (options per route, `page_count` semantics, webhook payload):
+  `../modal/CLAUDE.md`.
 
 ## Files in this repo
 
 - `CLAUDE.md` — this file; architecture overview and decisions.
 - `architecture.md` — systems, boundaries/auth, and the parse flow (storage + delivery) in detail.
-- `docs.md` — user-facing developer documentation (Laravel-style).
+- `docs/` — user-facing developer documentation (Laravel-style), split into pages; nav index in `docs/README.md`.
