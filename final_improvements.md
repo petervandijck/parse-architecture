@@ -61,11 +61,14 @@ without them.
   `ParseCompleted` / `ParseFailed` events can be dispatched directly in a test to drive a listener.
   Revisit a dedicated `Parse::fake()` only if customers ask. Optional later: a short "Testing"
   recipe in `docs/handling-results.md` showing the built-in approach.
-- [ ] **G5. Per-format page-equivalence rule for billing.** Billing finalizes on the `page_count`
-  Modal reports, but the unit is inconsistent across formats: docx is a "Pages estimate, fallback
-  1" (a 100-page docx with no `app.xml` estimate bills as 1), email is always 1, xlsx is sheet
-  count. The premium-cost question can stay deferred, but the SaaS metering code needs at least a
-  crude per-format rule before it can be written. See O1.
+- [x] **G5. Per-format page-equivalence rule for billing. Finalized** in
+  `../pricing-and-cost/credit-definition.md`: formats with real pages (PDF pages, PPTX slides)
+  bill those directly; non-paginated formats bill by extracted-text volume (min 1, on the
+  emitted markdown with table formatting stripped) at two thresholds: prose (docx, email) one
+  page per 3,000 chars, grids (xlsx, csv) one page per 10,000 chars. This replaces the
+  inconsistent raw counts (docx fallback-1, email always-1, xlsx sheet count). The SaaS metering
+  code follows that rule; user-facing version at `/docs/credit-definition`. Premium credit cost
+  stays deferred (see O1).
 - [x] **G6. `->pages()` on docx/email fails async.** **Decided:** validation is server-side, and
   the SaaS rejects bad option/extension combos **synchronously at submit** (`unsupported_option`)
   rather than letting them fail async. The SDK does not pre-validate, so the allowlist and option
@@ -118,9 +121,10 @@ without them.
 
 Already acknowledged as open in `CLAUDE.md`/`architecture.md`. Listed so they are not lost.
 
-- [ ] **O1. Page-equivalents for non-paginated formats and premium credit cost** (OCR / large /
-  high-accuracy above 1:1). The per-page unit is locked; the per-format equivalence is not. Feeds
-  G5.
+- [~] **O1. Page-equivalents for non-paginated formats and premium credit cost** (OCR / large /
+  high-accuracy above 1:1). Page-equivalence **finalized** (see G5 and
+  `../pricing-and-cost/credit-definition.md`): prose 3,000 chars/page, grids 10,000 chars/page.
+  Premium credit cost (above 1:1) is the only half still deferred.
 - [ ] **O2. Worker resource numbers and the 1 GB validation run.** Provisional sizing is in
   `../modal/CLAUDE.md`; the pre-launch 1 GB PDF end-to-end run is the one remaining backend task
   and sets the final memory/timeout/disk numbers.

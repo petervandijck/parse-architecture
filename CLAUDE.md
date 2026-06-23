@@ -62,18 +62,20 @@ before `->parse()`, a fast inline call (no queue to submit).
 
 ## Open decisions
 
-- **Page-equivalents for non-paginated formats.** 1 credit = 1 page is locked (see Decided),
-  but what counts as a "page" for an xlsx sheet, an email, or an image is deferred to
-  Phase 1+ — as is premium credit cost (OCR / large / high-accuracy above 1:1). Business
-  detail lives in the business repo's `pricing.md`; the architectural consequence is that
-  the SaaS metering code needs a per-format page-equivalence rule.
+- **Page-equivalents for non-paginated formats. Finalized** in
+  `../pricing-and-cost/credit-definition.md`: real pages bill directly (PDF pages, PPTX
+  slides); non-paginated formats bill by extracted-text volume, prose (docx, email) one page
+  per 3,000 chars and grids (xlsx, csv) one page per 10,000 chars, min 1. The SaaS metering code
+  implements that rule. Only **premium credit cost** (OCR / large / high-accuracy above 1:1)
+  stays deferred to Phase 1+.
 
 ### Decided
 
-- **Pricing/metering unit: per page.** 1 credit = 1 page, $3 per 1,000 credits, 10,000 free
-  credits/month, one tier (locked June 2026 — see the business repo's `pricing.md`). The
-  SaaS meters the `page_count` Modal reports in its completion webhook — billing finalizes
-  on completion, not at submit.
+- **Pricing/metering unit: per page.** 1 credit = 1 page (locked). The rate, tiers, free
+  allowance, and overage rules are **owned by `../pricing-and-cost/`, not here** — the figures
+  this file once quoted ($3/1k, 10,000 free/month, one tier) are **outdated placeholders; do
+  not rely on them.** Only the per-page unit is settled. The SaaS meters the `page_count`
+  Modal reports in its completion webhook — billing finalizes on completion, not at submit.
 - **One mode: always async**, event-delivered. No sync/blocking string call. `->parse()`
   returns a handle; a `ParseCompleted`/`ParseFailed` event carries the result. `->status()`
   reports progress for a UI — it **reads the local `parse_requests` row** (kept current by the
